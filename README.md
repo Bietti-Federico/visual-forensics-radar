@@ -2,7 +2,8 @@
 
 **Visual Forensics Radar** is a sophisticated, multi-layered AI orchestration system designed to detect digital forgeries, manual image manipulations, and AI-generated synthetic media. By combining mathematical error analysis, semantic latent space detection, and visual-language reasoning, it provides a comprehensive "forensic report" for any suspicious image.
 
-![visual-forensics-demo](images/image1.png)
+![visual-forensics-demo](images/image1.png)  
+
 ---
 
 ## 🏗️ System Architecture
