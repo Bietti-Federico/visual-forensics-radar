@@ -74,7 +74,7 @@ You can try the live version of the project here:
 **[Live Demo on Hugging Face Spaces](https://huggingface.co/spaces/kadircancelik/Fake-Detector)**
 
 >[!IMPORTANT]
->**Technical Performance Note:** The demo runs on Hugging Face's Free CPU Tier. Since the system operates without a GPU:
+>* **Technical Performance:** The demo runs on Hugging Face's Free CPU Tier. Since the system operates without a GPU:
 >* **Cold Start:** The initial loading of the AI engines may take 2-3 minutes.
 >* **Inference Speed:** Processing an image through all three layers (especially the VLM Layer) can take between 90 to 180 seconds.
 >* **Memory Optimization:** The Qwen2-VL model is forced to load in float32 on CPU memory.
