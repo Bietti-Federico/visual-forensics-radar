@@ -1,8 +1,45 @@
-# 🛡️ Visual Forensics Radar
+<h1 align="center">🛡️ Visual Forensics Radar</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+">
+   <img src="https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch">
+  <img src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+</p>
 
 **Visual Forensics Radar** is a sophisticated, multi-layered AI orchestration system designed to detect digital forgeries, manual image manipulations, and AI-generated synthetic media. By combining mathematical error analysis, semantic latent space detection, and visual-language reasoning, it provides a comprehensive "forensic report" for any suspicious image.
 
 ![visual-forensics-demo](images/image1.png)  
+
+---
+## 🤗 Hugging Face Demo
+You can try the live version of the project here:
+
+**[Live Demo on Hugging Face Spaces](https://huggingface.co/spaces/kadircancelik/Fake-Detector)**
+
+>[!IMPORTANT]
+>* **Technical Performance:** The demo runs on Hugging Face's Free CPU Tier. Since the system operates without a GPU:
+>* **Cold Start:** The initial loading of the AI engines may take 2-3 minutes.
+>* **Inference Speed:** Processing an image through all three layers (especially the VLM Layer) can take between 90 to 180 seconds.
+>* **Memory Optimization:** The Qwen2-VL model is forced to load in float32 on CPU memory.
+>* **Please be patient while the "Detective" analyzes the pixels and logic!**
+
+---
+
+## 📂 Repository Structure
+
+├── backend/  
+│   ├── ela_detector.py      # Error Level Analysis Engine  
+│   ├── clip_detector.py     # Semantic Deepfake Detector  
+│   └── vlm_explainer.py     # Qwen2-VL Reasoning Logic  
+├── frontend/  
+│   └── app.py               # Streamlit Dashboard  
+├── .streamlit/  
+│   └── config.toml          # Streamlit Configurations   
+├── main.py                  # FastAPI Entrypoint  
+├── Dockerfile               # Containerization blueprint  
+├── start.sh                 # Startup script for Docker  
+└── requirements.txt         # Dependencies  
 
 ---
 
@@ -37,21 +74,6 @@ The project employs a decoupled architecture consisting of a **FastAPI** backend
 
 ---
 
-## 📂 Repository Structure
-
-├── backend/  
-│   ├── ela_detector.py      # Error Level Analysis Engine  
-│   ├── clip_detector.py     # Semantic Deepfake Detector  
-│   └── vlm_explainer.py     # Qwen2-VL Reasoning Logic  
-├── frontend/  
-│   └── app.py               # Streamlit Dashboard  
-├── .streamlit/  
-│   └── config.toml          # Streamlit Configurations   
-├── main.py                  # FastAPI Entrypoint  
-├── Dockerfile               # Containerization blueprint  
-├── start.sh                 # Startup script for Docker  
-└── requirements.txt         # Dependencies  
-
 ## 🚀 Local Installation
 
 Ensure you have **Docker** installed on your machine.
@@ -69,15 +91,3 @@ Ensure you have **Docker** installed on your machine.
 4. **Access the Dashboard:**
    Open your browser and navigate to `http://localhost:8501`.
 
-
-## 🤗 Hugging Face Demo
-You can try the live version of the project here:
-
-**[Live Demo on Hugging Face Spaces](https://huggingface.co/spaces/kadircancelik/Fake-Detector)**
-
->[!IMPORTANT]
->* **Technical Performance:** The demo runs on Hugging Face's Free CPU Tier. Since the system operates without a GPU:
->* **Cold Start:** The initial loading of the AI engines may take 2-3 minutes.
->* **Inference Speed:** Processing an image through all three layers (especially the VLM Layer) can take between 90 to 180 seconds.
->* **Memory Optimization:** The Qwen2-VL model is forced to load in float32 on CPU memory.
->* **Please be patient while the "Detective" analyzes the pixels and logic!**
