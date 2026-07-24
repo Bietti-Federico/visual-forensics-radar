@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
-**Visual Forensics Radar** is a sophisticated, multi-layered AI orchestration system designed to detect digital forgeries, manual image manipulations, and AI-generated synthetic media. By combining mathematical error analysis, semantic latent space detection, and visual-language reasoning, it provides a comprehensive "forensic report" for any suspicious image.
+**Visual Forensics Radar** is a lightweight triage system designed to detect digital forgeries, manual image manipulations, and AI-generated synthetic media. By combining mathematical error analysis, semantic latent-space detection, and metadata inspection, it provides a fast forensic report for any suspicious image.
 
 ![visual-forensics-demo](images/image1.png)  
 
@@ -20,9 +20,8 @@ You can try the live version of the project here:
 >[!IMPORTANT]
 >* **Technical Performance:** The demo runs on Hugging Face's Free CPU Tier. Since the system operates without a GPU:
 >* **Cold Start:** The initial loading of the AI engines may take 2-3 minutes.
->* **Inference Speed:** Processing an image through all three layers (especially the VLM Layer) can take between 90 to 180 seconds.
->* **Memory Optimization:** The Qwen2-VL model is forced to load in float32 on CPU memory.
->* **Please be patient while the "Detective" analyzes the pixels and logic!**
+>* **Inference Speed:** Processing an image through the triage pipeline is designed to be fast enough for batch uploads.
+>* **Please be patient while the system analyzes the pixels, semantic signals, and metadata!**
 
 ---
 
@@ -31,7 +30,7 @@ You can try the live version of the project here:
 ├── backend/  
 │   ├── ela_detector.py      # Error Level Analysis Engine  
 │   ├── clip_detector.py     # Semantic Deepfake Detector  
-│   └── vlm_explainer.py     # Qwen2-VL Reasoning Logic  
+│   └── metadata_detector.py # Lightweight metadata inspection  
 ├── frontend/  
 │   └── app.py               # Streamlit Dashboard  
 ├── .streamlit/  
@@ -45,7 +44,7 @@ You can try the live version of the project here:
 
 ## 🏗️ System Architecture
 
-The project employs a decoupled architecture consisting of a **FastAPI** backend and a **Streamlit** frontend, orchestrated via **Docker**. It utilizes an "Ensemble of Experts" approach across three distinct forensic layers:
+The project employs a decoupled architecture consisting of a **FastAPI** backend and a **Streamlit** frontend, orchestrated via **Docker**. It uses a fast triage approach across three lightweight forensic signals:
 
 ### 🔍 Layer 1: Pixel-Level Analysis (ELA)
 * **Engine:** `ElaDetector`
@@ -57,10 +56,10 @@ The project employs a decoupled architecture consisting of a **FastAPI** backend
 * **Logic:** Leverages OpenAI's **CLIP** (Contrastive Language-Image Pre-training) for Zero-Shot classification.
 * **Target:** Detects the "latent DNA" of generative models (like Midjourney or DALL-E) by comparing image embeddings against known synthetic vs. real descriptors.
 
-### 🕵️ Layer 3: Logical Reasoning (VLM)
-* **Engine:** `VlmExplainer` 
-* **Logic:** Utilizes **Qwen2-VL-2B**, a state-of-the- visual-language model.
-* **Target:** Acts as a "Digital Detective" that identifies physical impossibilities (e.g., asymmetrical shadows, distorted limbs, or unnatural lighting) and explains them in natural language.
+### 📄 Layer 3: Metadata Inspection
+* **Engine:** `MetadataDetector`
+* **Logic:** Extracts EXIF, file size, resolution, and editing-software hints.
+* **Target:** Flags suspicious uploads with missing metadata, editing software tags, or atypical file properties.
 
 ---
 
@@ -69,7 +68,7 @@ The project employs a decoupled architecture consisting of a **FastAPI** backend
 * **API:** FastAPI
 * **Frontend:** Streamlit
 * **ML Frameworks:** PyTorch, Transformers (Hugging Face)
-* **Models:** `openai/clip-vit-base-patch32`, `Qwen/Qwen2-VL-2B-Instruct` 
+* **Models:** `openai/clip-vit-base-patch32`
 * **Deployment:** Docker
 
 ---

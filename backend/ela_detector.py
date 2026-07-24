@@ -1,5 +1,6 @@
 import os
 import logging
+import tempfile
 from PIL import Image, ImageChops, ImageEnhance
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -19,17 +20,20 @@ class ElaDetector:
         self.anomaly_threshold = anomaly_threshold
         logger.info(f"ELADetector initialized. Target Compression Quality: {self.quality}%, Threshold: {self.anomaly_threshold}")
 
-    def analyze(self, image_path:str, output_path:str="ela_heatmap.jpg") -> dict:
+    def _analyze_image(self, original_img: Image.Image, output_path: str | None = "ela_heatmap.jpg", anomaly_threshold: int | None = None) -> dict:
         """
-        Analyze the image and saves a heatmap that highlights manipualted pixels.
+        Analyze an in-memory image and optionally saves a heatmap.
         """
-        temp_filename = "temp_compressed.jpg"
+        temp_filename = None
 
         try:
-            original_img = Image.open(image_path).convert("RGB")
-            original_img.save(temp_filename,"JPEG",quality=self.quality)
+            original_img = original_img.convert("RGB")
 
-            compressed_img = Image.open(temp_filename)
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+                temp_filename = tmp_file.name
+
+            original_img.save(temp_filename, "JPEG", quality=self.quality)
+            compressed_img = Image.open(temp_filename).convert("RGB")
 
             # Calculate the mathematical difference between the two images (A - B)
             ela_image = ImageChops.difference(original_img, compressed_img)
@@ -46,32 +50,65 @@ class ElaDetector:
             scale = 255.0 / max_diff
             ela_image = ImageEnhance.Brightness(ela_image).enhance(scale)
 
-            ela_image.save(output_path)
+            if output_path:
+                ela_image.save(output_path)
 
-            if os.path.exists(temp_filename):
+            if temp_filename and os.path.exists(temp_filename):
                 os.remove(temp_filename)
 
-            logger.info(f"ELA Analysis complete. Heatmap saved to: {output_path}")
+            if output_path:
+                logger.info(f"ELA Analysis complete. Heatmap saved to: {output_path}")
+            else:
+                logger.info("ELA Analysis complete.")
 
-            is_anomaly = bool(max_diff > self.anomaly_threshold)
+            threshold = self.anomaly_threshold if anomaly_threshold is None else anomaly_threshold
+            is_anomaly = bool(max_diff > threshold)
 
             return{
 
                 "status":"success",
-                "original_image":image_path,
                 "ela_heatmap_path":output_path,
                 "max_difference":max_diff,
-                "anomaly_detected": is_anomaly
+                "anomaly_detected": is_anomaly,
+                "threshold_used": threshold
 
 
             }
         
         except Exception as e:
 
-            if os.path.exists(temp_filename):
+            if temp_filename and os.path.exists(temp_filename):
                 os.remove(temp_filename)
             
             logger.error(f"Error during ELA analysis: {str(e)}")
+            return {"status":"error", "message":str(e)}
+
+    def analyze(self, image_path:str, output_path:str="ela_heatmap.jpg", anomaly_threshold: int | None = None) -> dict:
+        """
+        Analyze an image from disk and optionally save a heatmap.
+        """
+        try:
+            original_img = Image.open(image_path).convert("RGB")
+            result = self._analyze_image(original_img, output_path=output_path, anomaly_threshold=anomaly_threshold)
+            result["original_image"] = image_path
+            return result
+        except Exception as e:
+            logger.error(f"Error during ELA analysis: {str(e)}")
+            return {"status":"error", "message":str(e)}
+
+    def analyze_crop(self, image_path: str, crop_box: tuple[int, int, int, int], anomaly_threshold: int | None = None) -> dict:
+        """
+        Analyze a cropped region without generating a heatmap file.
+        """
+        try:
+            image = Image.open(image_path).convert("RGB")
+            padded_box = crop_box
+            crop = image.crop(padded_box)
+            result = self._analyze_image(crop, output_path=None, anomaly_threshold=anomaly_threshold)
+            result["crop_box"] = padded_box
+            return result
+        except Exception as e:
+            logger.error(f"Error during cropped ELA analysis: {str(e)}")
             return {"status":"error", "message":str(e)}
         
 

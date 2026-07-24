@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 echo "Starting Deepfake API Server (Loading models into VRAM)..."
 uvicorn main:app --host 0.0.0.0 --port 8000 &
