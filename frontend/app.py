@@ -167,11 +167,16 @@ def render_analysis_result(index, uploaded_file, data):
 
                 if local_ela_regions:
                     st.markdown("**Local ELA on OCR candidates:**")
+                    st.caption(
+                        "relative_z compares each field's diff against the rest of this same "
+                        "document (null = too few comparable fields to trust that baseline)."
+                    )
                     for region in local_ela_regions:
                         text = region.get("text", "") or "[sin texto]"
                         diff = region.get("max_difference", 0)
                         anomaly = region.get("anomaly_detected", False)
-                        st.write(f"- {text}: diff={diff} | anomaly={anomaly}")
+                        relative_z = region.get("relative_z_score")
+                        st.write(f"- {text}: diff={diff} | anomaly={anomaly} | relative_z={relative_z}")
                 else:
                     st.info("No OCR candidate regions were detected for local ELA.")
 
@@ -179,7 +184,53 @@ def render_analysis_result(index, uploaded_file, data):
                 buckets = typography_data.get("buckets", {})
                 anomalous_fields = typography_data.get("anomalous_fields", [])
                 st.markdown("**Typography consistency:**")
-                st.caption("Compares glyph height and ink density of each field against the rest of the document.")
+                st.caption("Compares glyph height, ink density, slant and letter proportions of each field against the rest of the document.")
+
+                with st.expander("¿Qué mide esta validación?"):
+                    st.markdown(
+                        """
+Para cada monto y fecha detectado por OCR, se recorta el campo y se miden 4 señales
+independientes:
+- **Altura del glifo** (`height`): el alto en píxeles del texto.
+- **Densidad de tinta** (`ink_ratio`): qué fracción del recorte es trazo de texto vs. fondo,
+  detectando automáticamente si el texto es oscuro sobre claro o claro sobre oscuro
+  (por ejemplo una fila de "Total" resaltada en homebanking).
+- **Inclinación / caligrafía** (`slant_angle`): el ángulo dominante del trazo, estimado
+  por momentos de imagen sobre los píxeles de tinta — distingue una fuente itálica,
+  cursiva o manuscrita insertada en medio de texto impreso derecho.
+- **Proporción de letra** (`aspect_ratio`): ancho/alto del recuadro ajustado a la tinta
+  (no el recuadro de OCR) — distingue una fuente con letras más angostas o anchas que
+  la que predomina en el resto del documento.
+
+Estas 4 métricas se comparan **contra los demás campos del mismo tipo en el mismo
+documento** (montos contra montos, fechas contra fechas — nunca un monto contra una
+fecha, ni un número de cuenta contra un monto), usando mediana y desviación absoluta
+mediana (MAD) de forma robusta: cada campo se compara contra el resto excluyéndose a
+sí mismo, para que un solo valor atípico no contamine su propia referencia.
+
+Un campo se marca como **anómalo** si alguna de las 4 señales supera un z-score de
+3.5 — un umbral estadístico exigente (equivalente a una desviación muy poco probable
+por azar). La señal con mayor z-score queda registrada como "señal dominante", para
+saber si lo que se destacó fue el tamaño, la densidad, la inclinación o la
+proporción de la letra. Esto es típico de un valor pegado o reescrito con otra
+fuente/herramienta (o de un dato completado a mano) que sobrevive a la reimpresión o
+al reescaneo — y que por eso el ELA de compresión JPEG no detecta.
+
+**Límites a tener en cuenta:**
+- Necesita una población mínima por bucket (5 montos o 3 fechas) para confiar en la
+  comparación; si el documento tiene menos campos de un tipo, ese bucket queda
+  `insufficient_population` y no genera señal.
+- Un recorte sin contraste confiable (celda casi en blanco, muy baja separación entre
+  texto y fondo) se descarta directamente en vez de sumar ruido.
+- Inclinación y proporción necesitan una cantidad mínima de píxeles de tinta para
+  estimarse de forma confiable; si el trazo es demasiado chico, quedan en un valor
+  neutro (0° / 1:1) y no aportan señal para ese campo puntual.
+- Es una señal de **triage para orientar la revisión humana**, no una prueba de
+  edición por sí sola — cuando coincide con una anomalía de ELA local en el mismo
+  campo, el sistema la marca como corroborada y sube el score con más peso.
+                        """
+                    )
+
                 for bucket_name, bucket_info in buckets.items():
                     st.write(
                         f"- Bucket `{bucket_name}`: {bucket_info.get('status')} "
@@ -189,9 +240,14 @@ def render_analysis_result(index, uploaded_file, data):
                     for field in anomalous_fields:
                         marker = "🔑" if field.get("is_key_field") else "•"
                         st.write(
-                            f"{marker} {field.get('text', '')}: z-score={field.get('max_abs_z')} "
-                            f"| bucket={field.get('bucket')}"
+                            f"{marker} {field.get('text', '')}: señal dominante=`{field.get('dominant_feature')}` "
+                            f"(z-score={field.get('max_abs_z')}) | bucket={field.get('bucket')}"
                         )
+                        z_scores = field.get("z_scores")
+                        if z_scores:
+                            st.caption(
+                                " · ".join(f"{name}: {value}" for name, value in z_scores.items())
+                            )
                 else:
                     st.info("No se detectaron campos con tipografía atípica.")
 

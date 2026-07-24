@@ -61,6 +61,7 @@ class TypographyDetector:
     MIN_CROP_SIZE = 6
     CROP_PADDING = 3
     MIN_SEPARABILITY = 0.03
+    MIN_INK_PIXELS_FOR_SHAPE = 12
 
     def _bucket_for(self, region: dict) -> str | None:
         """
@@ -120,12 +121,50 @@ class TypographyDetector:
             mean_ink_intensity = float(pixels.mean())
             ink_std = float(pixels.std())
 
+        slant_angle, aspect_ratio = self._shape_features(ink_mask)
+
         return {
             "height_px": float(y2 - y1),
             "ink_ratio": ink_ratio,
             "mean_ink_intensity": mean_ink_intensity,
             "ink_std": ink_std,
+            "slant_angle": slant_angle,
+            "aspect_ratio": aspect_ratio,
         }
+
+    def _shape_features(self, ink_mask: np.ndarray) -> tuple[float, float]:
+        """
+        Estimates font/handwriting shape from the ink pixels themselves, independent of
+        density or glyph height:
+        - slant_angle: dominant stroke angle (degrees) from the second-order image
+          moments of the ink mask — a font swap or handwritten digit typically has a
+          different slant than the printed/rendered text around it.
+        - aspect_ratio: width/height of the tight bounding box around the actual ink
+          pixels (not the padded OCR bbox) — captures letter proportions, which differ
+          between fonts even when overall glyph height matches.
+        Falls back to neutral defaults (0.0 slant, 1.0 aspect) when there isn't enough
+        ink to estimate either reliably.
+        """
+        ys, xs = np.nonzero(ink_mask)
+        if ys.size < self.MIN_INK_PIXELS_FOR_SHAPE:
+            return 0.0, 1.0
+
+        width = float(xs.max() - xs.min() + 1)
+        height = float(ys.max() - ys.min() + 1)
+        aspect_ratio = width / height if height > 0 else 1.0
+
+        cx, cy = xs.mean(), ys.mean()
+        dx, dy = xs - cx, ys - cy
+        mu20 = float(np.mean(dx * dx))
+        mu02 = float(np.mean(dy * dy))
+        mu11 = float(np.mean(dx * dy))
+
+        if abs(mu20 - mu02) < 1e-9 and abs(mu11) < 1e-9:
+            slant_angle = 0.0
+        else:
+            slant_angle = float(np.degrees(0.5 * np.arctan2(2 * mu11, mu20 - mu02)))
+
+        return slant_angle, aspect_ratio
 
     def _leave_one_out_z_score(self, values: list[float], index: int) -> float:
         """
@@ -184,15 +223,24 @@ class TypographyDetector:
                 }
                 continue
 
-            heights = [entry["features"]["height_px"] for entry in entries]
-            ink_ratios = [entry["features"]["ink_ratio"] for entry in entries]
+            feature_series = {
+                "height": [entry["features"]["height_px"] for entry in entries],
+                "ink_ratio": [entry["features"]["ink_ratio"] for entry in entries],
+                "slant_angle": [entry["features"]["slant_angle"] for entry in entries],
+                "aspect_ratio": [entry["features"]["aspect_ratio"] for entry in entries],
+            }
 
             for idx, entry in enumerate(entries):
-                height_z = self._leave_one_out_z_score(heights, idx)
-                ink_z = self._leave_one_out_z_score(ink_ratios, idx)
-                max_abs_z = max(height_z, ink_z)
+                z_scores = {
+                    name: self._leave_one_out_z_score(series, idx)
+                    for name, series in feature_series.items()
+                }
+                dominant_feature = max(z_scores, key=z_scores.get)
+                max_abs_z = z_scores[dominant_feature]
 
+                entry["z_scores"] = {name: round(z, 2) for name, z in z_scores.items()}
                 entry["max_abs_z"] = round(max_abs_z, 2)
+                entry["dominant_feature"] = dominant_feature
                 entry["typography_anomaly"] = max_abs_z > self.Z_SCORE_THRESHOLD
                 entry["bucket"] = bucket_name
 

@@ -1,6 +1,7 @@
 import os
 import tempfile
 import logging
+import statistics
 from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -120,6 +121,53 @@ def _score_region_ela(region: dict) -> float:
     return 0.0
 
 
+MIN_LOCAL_ELA_SAMPLES = 6
+RELATIVE_ELA_Z_THRESHOLD = 3.5
+
+
+def _leave_one_out_z_score(values: list[float], index: int) -> float:
+    """
+    Modified (Iglewicz-Hoaglin) z-score of values[index] against the median/MAD of every
+    OTHER value in the list, so a field is never compared against a population that
+    includes itself. Mirrors the same robust-stats approach used in typography_detector.py.
+    """
+    others = values[:index] + values[index + 1:]
+    if len(others) < 2:
+        return 0.0
+
+    median = statistics.median(others)
+    mad = statistics.median([abs(v - median) for v in others])
+    if mad == 0:
+        return 0.0
+
+    return abs(0.6745 * (values[index] - median) / mad)
+
+
+def _apply_relative_ela_calibration(local_ela_results: list[dict]) -> None:
+    """
+    A physical fold/crease, uneven lighting, or paper texture raises ELA's max_difference
+    fairly uniformly across a WHOLE photographed document — a fixed absolute threshold
+    alone can't tell that apart from a genuinely edited field. When there are enough
+    comparable fields in the same document, a field is only kept as `anomaly_detected`
+    if it's ALSO a statistical outlier relative to the rest of THIS document's own
+    fields; a document-wide artifact that pushes every field past the absolute threshold
+    together no longer trips a false alarm, since none of them stand out from their peers.
+    With too few fields to trust a relative baseline, the absolute-threshold judgment
+    from ElaDetector is left untouched.
+    """
+    if len(local_ela_results) < MIN_LOCAL_ELA_SAMPLES:
+        for region in local_ela_results:
+            region["relative_z_score"] = None
+        return
+
+    diffs = [region.get("max_difference", 0) for region in local_ela_results]
+    for idx, region in enumerate(local_ela_results):
+        z = _leave_one_out_z_score(diffs, idx)
+        region["relative_z_score"] = round(z, 2)
+        if region.get("anomaly_detected") and z <= RELATIVE_ELA_Z_THRESHOLD:
+            region["anomaly_detected"] = False
+
+
 def _ranked_local_ela_regions(local_ela_results: list[dict[str, Any]]) -> list[tuple[float, dict]]:
     """
     Scores every region the same way `_score_local_ela` does internally, but keeps the
@@ -166,6 +214,19 @@ def _pad_bbox(bbox: tuple[int, int, int, int], image_width: int, image_height: i
         min(image_width, x2 + padding),
         min(image_height, y2 + padding),
     )
+
+
+TYPOGRAPHY_FEATURE_LABELS = {
+    "height": "altura de letra",
+    "ink_ratio": "densidad de tinta",
+    "slant_angle": "inclinación/caligrafía",
+    "aspect_ratio": "proporción de letra",
+}
+
+
+def _describe_typography_field(field: dict) -> str:
+    feature_label = TYPOGRAPHY_FEATURE_LABELS.get(field.get("dominant_feature"), "tipografía")
+    return f"{feature_label} distinta en '{field.get('text')}' (z-score {field.get('max_abs_z')})"
 
 
 def _find_corroborated_field(local_ela_results: list[dict], typography_result: dict) -> dict | None:
@@ -290,10 +351,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
     ]
     if typography_key_hits:
         top_field = typography_key_hits[0]
-        decision["evidence"].append(
-            f"Tipografía distinta detectada en campo clave '{top_field.get('text')}' "
-            f"(z-score {top_field.get('max_abs_z')})."
-        )
+        decision["evidence"].append(f"{_describe_typography_field(top_field).capitalize()} en campo clave.")
 
     if ocr_mean_conf and ocr_mean_conf < 45:
         decision["evidence"].append(f"OCR con confianza media baja ({ocr_mean_conf:.1f}%).")
@@ -329,8 +387,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             decision["primary_reason"] = f"Motivo principal: anomalía ELA en el campo '{field_text}' (mayor peso en el score)."
         elif winning_component == "typography":
             top_field = typography_key_hits[0] if typography_key_hits else (typography_result.get("anomalous_fields") or [{}])[0]
-            field_text = top_field.get("text") or "sin identificar"
-            decision["primary_reason"] = f"Motivo principal: tipografía distinta detectada en '{field_text}' (mayor peso en el score)."
+            decision["primary_reason"] = f"Motivo principal: {_describe_typography_field(top_field)} (mayor peso en el score)."
         elif winning_component == "receipt_consistency":
             top_signal = receipt_consistency_signals[0] if receipt_consistency_signals else "inconsistencia en montos del recibo"
             decision["primary_reason"] = f"Motivo principal: {top_signal} (mayor peso en el score)."
@@ -472,6 +529,8 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
         local_ela["priority"] = candidate.get("priority", 0)
         local_ela["line_text"] = candidate.get("line_text", "")
         local_ela_regions.append(local_ela)
+
+    _apply_relative_ela_calibration(local_ela_regions)
 
     if candidate_regions:
         logger.info("Step 5: Running Typography Consistency Analysis...")
