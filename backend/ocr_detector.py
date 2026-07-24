@@ -43,6 +43,24 @@ class OCRDetector:
         "periodo",
     )
 
+    MONTH_NAMES = {
+        "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+        "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+        "noviembre": 11, "diciembre": 12,
+    }
+
+    PERIOD_KEYWORD_PATTERN = re.compile(
+        r"per[ií]odo(?:\s+(?:abonado|liquidado))?|per\.?\s*abonado|per\.?\s*liquidado|sueldo\s*mes|mes\s*liquidado",
+        re.IGNORECASE,
+    )
+
+    PERIOD_VALUE_PATTERN = re.compile(
+        r"(?:(?P<mm>0?[1-9]|1[0-2])[\-/](?P<yyyy>\d{4}))"
+        r"|(?:(?P<yy2>\d{2})(?P<mm2>0[1-9]|1[0-2])\b)"
+        r"|(?:(?P<month_name>enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s*(?P<year_after_name>\d{4})?)",
+        re.IGNORECASE,
+    )
+
     NUMERIC_PATTERN = re.compile(r"[0-9][0-9\.,:/\-]*")
     DATE_PATTERN = re.compile(r"\b(?:[0-3]?\d[\-/][01]?\d[\-/](?:\d{2}|\d{4})|[01]?\d[\-/](?:\d{2}|\d{4}))\b")
     AMOUNT_PATTERN = re.compile(r"\$?\s*\(?\s*[0-9]{1,3}(?:[\.,][0-9]{3})*(?:[\.,][0-9]{1,2})\s*\)?")
@@ -101,20 +119,27 @@ class OCRDetector:
         "acreditado",
     )
 
-    def _preprocess(self, image: Image.Image) -> Image.Image:
+    def _preprocess(self, image: Image.Image) -> tuple[Image.Image, float]:
+        """
+        Returns the preprocessed image plus the inverse scale factor needed to map
+        coordinates from the preprocessed (possibly downscaled) image back to the
+        original image's coordinate space.
+        """
         image = image.convert("L")
         max_width = 1600
+        inverse_scale = 1.0
         if image.width > max_width:
             ratio = max_width / image.width
+            inverse_scale = image.width / max_width
             image = image.resize((max_width, int(image.height * ratio)))
         image = ImageOps.autocontrast(image)
         image = image.filter(ImageFilter.SHARPEN)
-        return image
+        return image, inverse_scale
 
     def analyze(self, image_path: str) -> dict:
         try:
             image = Image.open(image_path)
-            processed = self._preprocess(image)
+            processed, inverse_scale = self._preprocess(image)
 
             data = pytesseract.image_to_data(
                 processed,
@@ -147,7 +172,14 @@ class OCRDetector:
                 y = int(data["top"][idx])
                 w = int(data["width"][idx])
                 h = int(data["height"][idx])
-                bbox = (x, y, x + w, y + h)
+                # bbox is rescaled back to the original image's coordinate space,
+                # since Tesseract ran on a possibly downscaled copy.
+                bbox = (
+                    int(x * inverse_scale),
+                    int(y * inverse_scale),
+                    int((x + w) * inverse_scale),
+                    int((y + h) * inverse_scale),
+                )
 
                 words.append(OcrWord(text=raw_text, confidence=confidence, bbox=bbox))
                 confidence_values.append(confidence)
@@ -217,6 +249,9 @@ class OCRDetector:
                         "type": region_type,
                         "priority": priority,
                         "is_key_field": is_key_field,
+                        "is_numeric": entry["is_numeric"],
+                        "is_date": entry["is_date"],
+                        "is_amount": entry["is_amount"],
                         "line_text": " ".join(line_tokens)[:220],
                     })
 
@@ -451,6 +486,12 @@ class OCRDetector:
             score += 1
             signals.append("Se detectaron suficientes montos clave para validar el recibo.")
 
+        period_info = self.analyze_period_consistency(text_blob)
+        if period_info["periods_found"]:
+            fields["periods_found"] = period_info["periods_found"]
+        signals.extend(period_info["signals"])
+        score += period_info["consistency_score"]
+
         if score == 0 and fields:
             signals.append("Montos clave coherentes en la muestra OCR.")
 
@@ -460,4 +501,67 @@ class OCRDetector:
             "consistency_score": min(score, 4),
             "signals": signals,
             "fields": fields,
+        }
+
+    def _normalize_period(self, match: re.Match) -> tuple[int, int] | None:
+        if match.group("mm") and match.group("yyyy"):
+            return (int(match.group("mm")), int(match.group("yyyy")))
+
+        if match.group("yy2") and match.group("mm2"):
+            yy = int(match.group("yy2"))
+            year = 2000 + yy if yy < 70 else 1900 + yy
+            return (int(match.group("mm2")), year)
+
+        if match.group("month_name"):
+            month = self.MONTH_NAMES.get(match.group("month_name").lower())
+            year_raw = match.group("year_after_name")
+            if month and year_raw:
+                return (month, int(year_raw))
+
+        return None
+
+    def analyze_period_consistency(self, text_blob: str) -> dict:
+        """
+        Cross-checks every period/month field mentioned in the document (e.g. "Periodo
+        Liquidado" vs "Periodo Abonado" vs a "Sueldo Mes X" header). A legitimate receipt
+        should reference a single period throughout; disagreement is a strong sign that
+        an old receipt was reused and only the period field was edited.
+        """
+        periods = []
+        for keyword_match in self.PERIOD_KEYWORD_PATTERN.finditer(text_blob):
+            window = text_blob[keyword_match.end():keyword_match.end() + 40]
+            value_match = self.PERIOD_VALUE_PATTERN.search(window)
+            if not value_match:
+                continue
+
+            normalized = self._normalize_period(value_match)
+            if normalized is None:
+                continue
+
+            periods.append({
+                "label": keyword_match.group(0).strip(),
+                "raw": value_match.group(0).strip(),
+                "normalized": normalized,
+            })
+
+        signals = []
+        score = 0
+        distinct_periods = {period["normalized"] for period in periods}
+
+        if len(distinct_periods) >= 2:
+            score = 2
+            first, second = periods[0], next(p for p in periods if p["normalized"] != first["normalized"])
+            signals.append(
+                f"Inconsistencia de período: '{first['label']} {first['raw']}' vs "
+                f"'{second['label']} {second['raw']}'."
+            )
+        elif len(distinct_periods) == 1 and len(periods) >= 2:
+            signals.append("Períodos consistentes entre los campos detectados.")
+
+        return {
+            "status": "success",
+            "detected": bool(periods),
+            "periods_found": periods,
+            "consistency_score": score,
+            "signals": signals,
         }

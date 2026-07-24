@@ -30,6 +30,7 @@ with st.sidebar:
     st.markdown("-**ELA** (Pixel Anomaly)")
     st.markdown("-**CLIP** (Semantic Vision)")
     st.markdown("-**OCR** (Text Integrity)")
+    st.markdown("-**Typography** (Font Consistency)")
     st.markdown("-**Fast Triage Scoring** (Score + Band)")
     st.markdown(f"-**Batch Size:** {MAX_BATCH_SIZE}")
     st.markdown("---")
@@ -67,6 +68,15 @@ def render_analysis_result(index, uploaded_file, data):
             st.json(file_details)
 
         with col_res:
+            primary_reason = decision.get("primary_reason")
+            if primary_reason:
+                if "confirmada" in primary_reason.lower() or "altamente" in risk_band:
+                    st.error(primary_reason)
+                elif "sospechoso" in risk_band:
+                    st.warning(primary_reason)
+                else:
+                    st.info(primary_reason)
+
             st.subheader("Executive Diagnosis")
             st.metric("Document Type", document_type)
             st.metric("Type Confidence", f"{document_confidence:.1f}%")
@@ -109,13 +119,11 @@ def render_analysis_result(index, uploaded_file, data):
                     st.success("Status: Clean")
 
             with tab2:
-                clip_data = diags.get("clip_layer", {})
                 st.markdown("#### Routing Signal")
-                st.caption("CLIP is used here as a soft routing/support signal, not as a fraud verdict.")
+                st.caption("CLIP is used only to route the document to the right pipeline, not as a fraud signal.")
                 st.metric("Document Routing Confidence", f"{document_confidence:.1f}%")
                 st.progress(int(min(max(document_confidence, 0), 100)))
                 st.write(f"**Best label:** {type_info.get('document_type_label', 'N/A')}")
-                st.write(f"**CLIP support score:** {component_scores.get('clip', 0):.1f}")
 
             with tab3:
                 metadata_data = diags.get("metadata_layer", {})
@@ -167,15 +175,36 @@ def render_analysis_result(index, uploaded_file, data):
                 else:
                     st.info("No OCR candidate regions were detected for local ELA.")
 
+                typography_data = diags.get("typography_layer", {})
+                buckets = typography_data.get("buckets", {})
+                anomalous_fields = typography_data.get("anomalous_fields", [])
+                st.markdown("**Typography consistency:**")
+                st.caption("Compares glyph height and ink density of each field against the rest of the document.")
+                for bucket_name, bucket_info in buckets.items():
+                    st.write(
+                        f"- Bucket `{bucket_name}`: {bucket_info.get('status')} "
+                        f"(n={bucket_info.get('sample_count', 0)})"
+                    )
+                if anomalous_fields:
+                    for field in anomalous_fields:
+                        marker = "🔑" if field.get("is_key_field") else "•"
+                        st.write(
+                            f"{marker} {field.get('text', '')}: z-score={field.get('max_abs_z')} "
+                            f"| bucket={field.get('bucket')}"
+                        )
+                else:
+                    st.info("No se detectaron campos con tipografía atípica.")
+
             with tab5:
                 st.markdown("#### Score Breakdown")
                 st.caption("Weighted components used to compute the final triage score.")
                 st.metric("Final Score", f"{score:.1f}")
                 st.write(f"**Local ELA:** {component_scores.get('local_ela', 0):.1f}")
+                st.write(f"**Typography:** {component_scores.get('typography', 0):.1f}")
                 st.write(f"**OCR:** {component_scores.get('ocr', 0):.1f}")
+                st.write(f"**Receipt Consistency:** {component_scores.get('receipt_consistency', 0):.1f}")
                 st.write(f"**Global ELA:** {component_scores.get('global_ela', 0):.1f}")
                 st.write(f"**Metadata:** {component_scores.get('metadata', 0):.1f}")
-                st.write(f"**CLIP:** {component_scores.get('clip', 0):.1f}")
         else:
             tab1, tab2 = st.tabs(["Categorization", "Raw Signals"])
 

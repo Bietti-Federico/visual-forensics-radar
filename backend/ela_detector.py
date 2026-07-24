@@ -83,25 +83,38 @@ class ElaDetector:
             logger.error(f"Error during ELA analysis: {str(e)}")
             return {"status":"error", "message":str(e)}
 
-    def analyze(self, image_path:str, output_path:str="ela_heatmap.jpg", anomaly_threshold: int | None = None) -> dict:
+    @staticmethod
+    def _load(image_source: str | Image.Image) -> Image.Image:
         """
-        Analyze an image from disk and optionally save a heatmap.
+        Accepts either a path or an already-opened PIL Image so callers doing many
+        crops on the same photo (e.g. per-field local ELA) can decode it once and
+        reuse it, instead of re-reading and re-decoding the full-resolution file
+        from disk on every call.
+        """
+        if isinstance(image_source, Image.Image):
+            return image_source.convert("RGB")
+        return Image.open(image_source).convert("RGB")
+
+    def analyze(self, image_source: str | Image.Image, output_path: str | None = None, anomaly_threshold: int | None = None) -> dict:
+        """
+        Analyze an image (from disk or an already-opened PIL Image) and optionally save a heatmap.
+        The heatmap is only written when output_path is explicitly provided.
         """
         try:
-            original_img = Image.open(image_path).convert("RGB")
+            original_img = self._load(image_source)
             result = self._analyze_image(original_img, output_path=output_path, anomaly_threshold=anomaly_threshold)
-            result["original_image"] = image_path
+            result["original_image"] = image_source if isinstance(image_source, str) else "<in-memory>"
             return result
         except Exception as e:
             logger.error(f"Error during ELA analysis: {str(e)}")
             return {"status":"error", "message":str(e)}
 
-    def analyze_crop(self, image_path: str, crop_box: tuple[int, int, int, int], anomaly_threshold: int | None = None) -> dict:
+    def analyze_crop(self, image_source: str | Image.Image, crop_box: tuple[int, int, int, int], anomaly_threshold: int | None = None) -> dict:
         """
         Analyze a cropped region without generating a heatmap file.
         """
         try:
-            image = Image.open(image_path).convert("RGB")
+            image = self._load(image_source)
             padded_box = crop_box
             crop = image.crop(padded_box)
             result = self._analyze_image(crop, output_path=None, anomaly_threshold=anomaly_threshold)

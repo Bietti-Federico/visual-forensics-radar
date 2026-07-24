@@ -5,11 +5,13 @@ from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from PIL import Image
 
 from backend.ela_detector import ElaDetector
 from backend.clip_detector import ClipAuthenticator
 from backend.metadata_detector import MetadataDetector
 from backend.ocr_detector import OCRDetector
+from backend.typography_detector import TypographyDetector
 
 logging.basicConfig(level=logging.INFO, format ='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("DeepFakeAPI")
@@ -37,6 +39,7 @@ async def lifespan(app: FastAPI):
         models["clip"] = ClipAuthenticator()
         models["metadata"] = MetadataDetector()
         models["ocr"] = OCRDetector()
+        models["typography"] = TypographyDetector()
         logger.info("Validation engines successfully initialized. API is ready to serve!")
 
     except Exception as e:
@@ -63,12 +66,6 @@ def _normalize_band(score: float) -> tuple[str, str]:
     return "poco_sospechoso", "Poco sospechoso"
 
 
-def _score_clip(ai_prob: float) -> float:
-    # CLIP is kept as a very soft supporting signal for receipts only.
-    # We cap its influence to avoid document-type false positives dominating the score.
-    return _clamp(max(0.0, ai_prob - 80.0) * 0.9)
-
-
 def _score_metadata(metadata_score: int) -> float:
     return _clamp((metadata_score / 4.0) * 100.0)
 
@@ -79,6 +76,16 @@ def _score_ocr(ocr_score: int) -> float:
 
 def _score_receipt_consistency(consistency_score: int) -> float:
     return _clamp((consistency_score / 4.0) * 100.0)
+
+
+def _score_typography(typography_result: dict) -> float:
+    anomalous_fields = typography_result.get("anomalous_fields", [])
+    if not anomalous_fields:
+        return 0.0
+
+    key_field_hits = sum(1 for field in anomalous_fields if field.get("is_key_field"))
+    other_hits = len(anomalous_fields) - key_field_hits
+    return _clamp(key_field_hits * 35.0 + other_hits * 15.0)
 
 
 def _score_global_ela(max_diff: int, anomaly_detected: bool, threshold_used: int = 35) -> float:
@@ -141,7 +148,32 @@ def _pad_bbox(bbox: tuple[int, int, int, int], image_width: int, image_height: i
     )
 
 
-def decision_engine(ela_result: dict, clip_result: dict, metadata_result: dict, ocr_result: dict, local_ela_results: list[dict]) -> dict:
+def _find_corroborated_field(local_ela_results: list[dict], typography_result: dict) -> dict | None:
+    """
+    Cross-references ELA-local anomalies with typography anomalies by field text.
+    A key field flagged by BOTH independent methods is a much stronger signal of
+    an edited value than either one alone, and is the basis for the score floor
+    and headline alert below.
+    """
+    typography_anomalies = {
+        (field.get("text") or "").strip().lower(): field
+        for field in typography_result.get("anomalous_fields", [])
+        if field.get("is_key_field")
+    }
+    if not typography_anomalies:
+        return None
+
+    for region in local_ela_results:
+        if not (region.get("is_key_field") and region.get("anomaly_detected")):
+            continue
+        key = (region.get("text") or "").strip().lower()
+        if key and key in typography_anomalies:
+            return {"text": region.get("text"), "ela_region": region, "typography_field": typography_anomalies[key]}
+
+    return None
+
+
+def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, local_ela_results: list[dict], typography_result: dict) -> dict:
     """
     Fast triage engine for receipt validation.
     Combines light-weight visual and semantic signals into three human-review levels.
@@ -158,45 +190,58 @@ def decision_engine(ela_result: dict, clip_result: dict, metadata_result: dict, 
     receipt_consistency = ocr_result.get("receipt_consistency", {})
     receipt_consistency_score = receipt_consistency.get("consistency_score", 0)
     receipt_consistency_signals = receipt_consistency.get("signals", [])
-    clip_probs = clip_result.get("detailed_probabilities",{})
-    ai_prob = clip_probs.get("ai_probability",0)
 
-    clip_score = _score_clip(ai_prob)
     global_ela_score = _score_global_ela(max_diff, ela_anomaly, threshold_used=threshold_used)
     metadata_norm = _score_metadata(metadata_score)
     ocr_norm = _score_ocr(ocr_score)
     receipt_consistency_norm = _score_receipt_consistency(receipt_consistency_score)
     local_ela_norm = _score_local_ela(local_ela_results)
+    typography_norm = _score_typography(typography_result)
 
-    final_score = _clamp(
-        (0.60 * local_ela_norm)
-        + (0.20 * receipt_consistency_norm)
-        + (0.08 * ocr_norm)
-        + (0.06 * global_ela_score)
-        + (0.04 * metadata_norm)
-        + (0.02 * clip_score)
-    )
+    weighted_components = {
+        "local_ela": (0.57, local_ela_norm),
+        "typography": (0.10, typography_norm),
+        "receipt_consistency": (0.20, receipt_consistency_norm),
+        "ocr": (0.08, ocr_norm),
+        "global_ela": (0.03, global_ela_score),
+        "metadata": (0.02, metadata_norm),
+    }
+
+    final_score = _clamp(sum(weight * value for weight, value in weighted_components.values()))
+
+    corroborated_field = _find_corroborated_field(local_ela_results, typography_result)
+    if corroborated_field is not None:
+        final_score = max(final_score, 75.0)
 
     band_key, band_label = _normalize_band(final_score)
 
-    clip_probs = clip_result.get("detailed_probabilities",{})
     decision = {
         "score": round(final_score, 2),
         "risk_band": band_key,
         "risk_label": band_label,
         "component_scores": {
             "local_ela": round(local_ela_norm, 2),
+            "typography": round(typography_norm, 2),
             "ocr": round(ocr_norm, 2),
             "receipt_consistency": round(receipt_consistency_norm, 2),
             "global_ela": round(global_ela_score, 2),
             "metadata": round(metadata_norm, 2),
-            "clip": round(clip_score, 2),
         },
         "evidence": [],
+        "primary_reason": None,
         "metadata": metadata_result,
         "ocr": ocr_result,
         "local_ela_regions": local_ela_results,
+        "typography": typography_result,
     }
+
+    corroboration_message = None
+    if corroborated_field is not None:
+        corroboration_message = (
+            f"Posible edición confirmada en campo clave: '{corroborated_field['text']}' "
+            "(ELA local + tipografía coinciden)."
+        )
+        decision["evidence"].append(corroboration_message)
 
     if final_score >= 60:
         decision["evidence"].append("Revisión prioritaria recomendada.")
@@ -220,6 +265,16 @@ def decision_engine(ela_result: dict, clip_result: dict, metadata_result: dict, 
     elif key_region_alerts == 1:
         decision["evidence"].append("Anomalía ELA detectada en un campo clave (fecha o monto).")
 
+    typography_key_hits = [
+        field for field in typography_result.get("anomalous_fields", []) if field.get("is_key_field")
+    ]
+    if typography_key_hits:
+        top_field = typography_key_hits[0]
+        decision["evidence"].append(
+            f"Tipografía distinta detectada en campo clave '{top_field.get('text')}' "
+            f"(z-score {top_field.get('max_abs_z')})."
+        )
+
     if ocr_mean_conf and ocr_mean_conf < 45:
         decision["evidence"].append(f"OCR con confianza media baja ({ocr_mean_conf:.1f}%).")
 
@@ -239,6 +294,35 @@ def decision_engine(ela_result: dict, clip_result: dict, metadata_result: dict, 
     for signal in receipt_consistency_signals[:2]:
         if signal not in decision["evidence"]:
             decision["evidence"].append(signal)
+
+    if corroboration_message is not None:
+        decision["primary_reason"] = corroboration_message
+    else:
+        contributions = {name: weight * value for name, (weight, value) in weighted_components.items()}
+        winning_component = max(contributions, key=contributions.get)
+
+        if contributions[winning_component] <= 0.5:
+            decision["primary_reason"] = "Sin señales de peso relevante detectadas."
+        elif winning_component == "local_ela":
+            key_hit = next((r for r in local_ela_results if r.get("is_key_field") and r.get("anomaly_detected")), None)
+            top_region = key_hit or next((r for r in local_ela_results if r.get("anomaly_detected")), None)
+            field_text = (top_region or {}).get("text") or "sin identificar"
+            decision["primary_reason"] = f"Motivo principal: anomalía ELA en el campo '{field_text}' (mayor peso en el score)."
+        elif winning_component == "typography":
+            top_field = typography_key_hits[0] if typography_key_hits else (typography_result.get("anomalous_fields") or [{}])[0]
+            field_text = top_field.get("text") or "sin identificar"
+            decision["primary_reason"] = f"Motivo principal: tipografía distinta detectada en '{field_text}' (mayor peso en el score)."
+        elif winning_component == "receipt_consistency":
+            top_signal = receipt_consistency_signals[0] if receipt_consistency_signals else "inconsistencia en montos del recibo"
+            decision["primary_reason"] = f"Motivo principal: {top_signal} (mayor peso en el score)."
+        elif winning_component == "ocr":
+            top_signal = ocr_signals[0] if ocr_signals else "baja calidad de lectura OCR"
+            decision["primary_reason"] = f"Motivo principal: {top_signal} (mayor peso en el score)."
+        elif winning_component == "metadata":
+            top_signal = metadata_signals[0] if metadata_signals else "señales de metadatos"
+            decision["primary_reason"] = f"Motivo principal: {top_signal} (mayor peso en el score)."
+        else:
+            decision["primary_reason"] = "Motivo principal: anomalía de compresión JPEG generalizada en la imagen (mayor peso en el score)."
 
     return decision
 
@@ -289,8 +373,8 @@ def build_category_only_response(file_name: str, type_result: dict, ocr_result: 
     }
 
 
-def build_receipt_response(file_name: str, type_result: dict, ela_res: dict, clip_res: dict, metadata_res: dict, ocr_res: dict, local_ela_regions: list[dict]) -> dict:
-    final_decision = decision_engine(ela_res, clip_res, metadata_res, ocr_res, local_ela_regions)
+def build_receipt_response(file_name: str, type_result: dict, ela_res: dict, metadata_res: dict, ocr_res: dict, local_ela_regions: list[dict], typography_res: dict) -> dict:
+    final_decision = decision_engine(ela_res, metadata_res, ocr_res, local_ela_regions, typography_res)
     return {
         "status": "success",
         "analysis_route": "receipt_control",
@@ -301,10 +385,10 @@ def build_receipt_response(file_name: str, type_result: dict, ela_res: dict, cli
             "file_name": file_name,
             "document_type_classification": type_result,
             "ela_layer": ela_res,
-            "clip_layer": clip_res,
             "metadata_layer": metadata_res,
             "ocr_layer": ocr_res,
             "ocr_local_ela_regions": local_ela_regions,
+            "typography_layer": typography_res,
             "validation_mode": "receipt-control",
         },
     }
@@ -334,8 +418,13 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
 
     logger.info("Route selected: receipt control")
 
+    # Decoded once and reused for the global ELA pass, every per-field ELA crop, and
+    # typography analysis, instead of each one re-reading and re-decoding the
+    # full-resolution photo from disk on its own.
+    shared_image = Image.open(temp_file_path).convert("RGB")
+
     logger.info("Step 2: Running ELA (Pixel) Analysis...")
-    ela_res = models["ela"].analyze(temp_file_path)
+    ela_res = models["ela"].analyze(shared_image)
 
     logger.info("Step 3: Running Metadata Analysis...")
     metadata_res = models["metadata"].analyze(temp_file_path)
@@ -354,7 +443,7 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
             continue
         padded_bbox = _pad_bbox(tuple(bbox), image_width, image_height, padding=14)
         local_threshold = 16 if candidate.get("is_key_field") else 20
-        local_ela = models["ela"].analyze_crop(temp_file_path, padded_bbox, anomaly_threshold=local_threshold)
+        local_ela = models["ela"].analyze_crop(shared_image, padded_bbox, anomaly_threshold=local_threshold)
         local_ela["text"] = candidate.get("text", "")
         local_ela["region_type"] = candidate.get("type", "unknown")
         local_ela["is_key_field"] = bool(candidate.get("is_key_field", False))
@@ -362,8 +451,13 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
         local_ela["line_text"] = candidate.get("line_text", "")
         local_ela_regions.append(local_ela)
 
-    clip_res = models["clip"].analyze(temp_file_path)
-    return build_receipt_response(file_name, type_result, ela_res, clip_res, metadata_res, ocr_res, local_ela_regions)
+    if candidate_regions:
+        logger.info("Step 5: Running Typography Consistency Analysis...")
+        typography_res = models["typography"].analyze(shared_image, candidate_regions)
+    else:
+        typography_res = {"status": "success", "buckets": {}, "anomalous_fields": []}
+
+    return build_receipt_response(file_name, type_result, ela_res, metadata_res, ocr_res, local_ela_regions, typography_res)
 
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...)):
@@ -373,7 +467,7 @@ async def analyze_image(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400,detail="Please upload a valid image file.")
 
-    required_models = ("ela", "clip", "metadata", "ocr")
+    required_models = ("ela", "clip", "metadata", "ocr", "typography")
     missing_models = [name for name in required_models if name not in models]
     if missing_models:
         raise HTTPException(
@@ -413,7 +507,7 @@ async def analyze_batch(files: list[UploadFile] = File(...)):
             detail=f"Batch too large. Maximum {MAX_BATCH_SIZE} images per request.",
         )
 
-    required_models = ("ela", "clip", "metadata", "ocr")
+    required_models = ("ela", "clip", "metadata", "ocr", "typography")
     missing_models = [name for name in required_models if name not in models]
     if missing_models:
         raise HTTPException(
