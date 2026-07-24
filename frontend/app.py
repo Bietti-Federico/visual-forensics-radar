@@ -5,8 +5,6 @@ import requests
 import os
 
 API_URL = os.getenv("DEEPFAKE_API_URL", "http://127.0.0.1:8000/analyze")
-BATCH_API_URL = os.getenv("DEEPFAKE_API_BATCH_URL", API_URL.replace("/analyze", "/analyze-batch"))
-MAX_BATCH_SIZE = 4
 
 st.set_page_config(
     page_title="Deepfake Forensics Radar", 
@@ -32,14 +30,13 @@ with st.sidebar:
     st.markdown("-**OCR** (Text Integrity)")
     st.markdown("-**Typography** (Font Consistency)")
     st.markdown("-**Fast Triage Scoring** (Score + Band)")
-    st.markdown(f"-**Batch Size:** {MAX_BATCH_SIZE}")
     st.markdown("---")
 
 st.markdown('<p class="main-header"> Deepfake & AI Forensics Radar</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Upload one or more suspicious images to run a fast, batch triage analysis.</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Upload a suspicious image to run a fast triage analysis.</p>', unsafe_allow_html=True)
 
 
-uploaded_files = st.file_uploader("Upload Target Image(s) (JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_file = st.file_uploader("Upload Target Image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
 def render_analysis_result(index, uploaded_file, data):
     decision = data.get("final_decision", {})
@@ -320,52 +317,22 @@ al reescaneo — y que por eso el ELA de compresión JPEG no detecta.
                 st.write(f"**Text excerpt:** {ocr_data.get('text_excerpt', '')}")
 
 
-if uploaded_files:
-    if len(uploaded_files) > MAX_BATCH_SIZE:
-        st.info(f"Selected {len(uploaded_files)} images. They will be processed in batches of {MAX_BATCH_SIZE}.")
-
+if uploaded_file is not None:
     analyze_btn = st.button("Run Forensic Analysis", width="stretch", type="primary")
 
     if analyze_btn:
-        with st.spinner("Analyzing batch... Please wait."):
+        with st.spinner("Analyzing... Please wait."):
             try:
-                all_results = []
-                summary_rows = []
+                files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                response = requests.post(API_URL, files=files)
 
-                for start_idx in range(0, len(uploaded_files), MAX_BATCH_SIZE):
-                    batch = uploaded_files[start_idx:start_idx + MAX_BATCH_SIZE]
-                    multipart_files = [
-                        ("files", (file.name, file.getvalue(), file.type))
-                        for file in batch
-                    ]
+                if response.status_code != 200:
+                    st.error(f"API Error {response.status_code}: {response.text}")
+                    st.stop()
 
-                    response = requests.post(BATCH_API_URL, files=multipart_files)
-                    if response.status_code != 200:
-                        st.error(f"API Error {response.status_code}: {response.text}")
-                        st.stop()
-
-                    payload = response.json()
-                    batch_results = payload.get("results", [])
-
-                    for file_obj, result in zip(batch, batch_results):
-                        all_results.append((file_obj, result))
-                        decision = result.get("final_decision", {})
-                        summary_rows.append({
-                            "file": file_obj.name,
-                            "type": result.get("document_type", "unknown"),
-                            "route": result.get("analysis_route", "unknown"),
-                            "score": decision.get("score", "N/A"),
-                            "risk": decision.get("risk_label", "N/A"),
-                            "band": decision.get("risk_band", "N/A"),
-                        })
-
-                if summary_rows:
-                    st.subheader("Batch Summary")
-                    st.dataframe(summary_rows, use_container_width=True, hide_index=True)
-
-                st.subheader("Detailed Analyses")
-                for idx, (file_obj, result) in enumerate(all_results):
-                    render_analysis_result(idx, file_obj, result)
+                result = response.json()
+                st.subheader("Analysis Result")
+                render_analysis_result(0, uploaded_file, result)
 
             except requests.exceptions.ConnectionError:
                 st.error("ERROR: Could not connect to the Backend API.")

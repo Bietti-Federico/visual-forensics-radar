@@ -17,7 +17,6 @@ from backend.typography_detector import TypographyDetector
 logging.basicConfig(level=logging.INFO, format ='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("DeepFakeAPI")
 
-MAX_BATCH_SIZE = 4
 RECEIPT_ROUTES = {"receipt", "unknown"}
 IDENTITY_ROUTES = {"dni_front", "dni_back"}
 CARD_ROUTES = {"card"}
@@ -254,6 +253,27 @@ def _find_corroborated_field(local_ela_results: list[dict], typography_result: d
     return None
 
 
+STRONG_TYPOGRAPHY_Z_THRESHOLD = 8.0
+
+
+def _strongest_typography_key_field(typography_result: dict) -> dict | None:
+    """
+    A fraud pattern based purely on font/handwriting substitution (a receipt reprinted
+    or hand-completed with a different tool) leaves NO compression trace for ELA to
+    corroborate — requiring both signals to agree would systematically miss exactly
+    that pattern. A typography anomaly on a key field with a z-score far beyond the
+    3.5 flagging threshold (this checks >=8, more than double it) is treated as strong
+    standalone evidence in its own right, without needing ELA agreement.
+    """
+    key_hits = [
+        field for field in typography_result.get("anomalous_fields", [])
+        if field.get("is_key_field") and field.get("max_abs_z", 0) >= STRONG_TYPOGRAPHY_Z_THRESHOLD
+    ]
+    if not key_hits:
+        return None
+    return max(key_hits, key=lambda field: field.get("max_abs_z", 0))
+
+
 def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, local_ela_results: list[dict], typography_result: dict) -> dict:
     """
     Fast triage engine for receipt validation.
@@ -294,6 +314,10 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
     if corroborated_field is not None:
         final_score = max(final_score, 75.0)
 
+    strong_typography_field = _strongest_typography_key_field(typography_result)
+    if strong_typography_field is not None:
+        final_score = max(final_score, 60.0)
+
     band_key, band_label = _normalize_band(final_score)
 
     decision = {
@@ -323,6 +347,14 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             "(ELA local + tipografía coinciden)."
         )
         decision["evidence"].append(corroboration_message)
+
+    strong_typography_message = None
+    if strong_typography_field is not None:
+        strong_typography_message = (
+            f"Tipografía marcadamente distinta en campo clave: {_describe_typography_field(strong_typography_field)}. "
+            "Patrón típico de sustitución de fuente/caligrafía sin rastro de compresión JPEG que ELA pueda corroborar."
+        )
+        decision["evidence"].append(strong_typography_message)
 
     if final_score >= 60:
         decision["evidence"].append("Revisión prioritaria recomendada.")
@@ -375,6 +407,8 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
 
     if corroboration_message is not None:
         decision["primary_reason"] = corroboration_message
+    elif strong_typography_message is not None:
+        decision["primary_reason"] = strong_typography_message
     else:
         contributions = {name: weight * value for name, (weight, value) in weighted_components.items()}
         winning_component = max(contributions, key=contributions.get)
@@ -576,60 +610,3 @@ async def analyze_image(file: UploadFile = File(...)):
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
             logger.info(f"Temporary file deleted securely: {file.filename}")
-
-
-@app.post("/analyze-batch")
-async def analyze_batch(files: list[UploadFile] = File(...)):
-    if len(files) == 0:
-        raise HTTPException(status_code=400, detail="Please upload at least one image file.")
-    if len(files) > MAX_BATCH_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Batch too large. Maximum {MAX_BATCH_SIZE} images per request.",
-        )
-
-    required_models = ("ela", "clip", "metadata", "ocr", "typography")
-    missing_models = [name for name in required_models if name not in models]
-    if missing_models:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Models not initialized: {', '.join(missing_models)}"
-        )
-
-    results = []
-    temp_paths = []
-
-    try:
-        for file in files:
-            if not file.content_type.startswith("image/"):
-                raise HTTPException(status_code=400, detail=f"Invalid file type for {file.filename}")
-
-            temp_dir = tempfile.gettempdir()
-            file_suffix = os.path.splitext(file.filename)[1] or ".img"
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix, dir=temp_dir)
-            temp_file_path = temp_file.name
-            temp_file.close()
-            temp_paths.append((temp_file_path, file.filename))
-
-            with open(temp_file_path, "wb") as buffer:
-                buffer.write(await file.read())
-
-        for temp_file_path, file_name in temp_paths:
-            results.append(analyze_file_path(temp_file_path, file_name))
-
-        return JSONResponse(content={
-            "status": "success",
-            "batch_size": len(results),
-            "results": results,
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error during batch analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"System Error: {str(e)}")
-    finally:
-        for temp_file_path, file_name in temp_paths:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-                logger.info(f"Temporary file deleted securely: {file_name}")
