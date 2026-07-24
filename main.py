@@ -97,6 +97,13 @@ def _score_global_ela(max_diff: int, anomaly_detected: bool, threshold_used: int
 
 
 def _score_region_ela(region: dict) -> float:
+    """
+    Real photos of printed documents routinely show ELA max_difference in the low-to-mid
+    teens purely from JPEG recompression noise around high-contrast text — that is NOT
+    evidence of tampering. Only `anomaly_detected` (max_diff strictly above the threshold)
+    is treated as meaningful signal; values approaching the threshold get a small, fast-decaying
+    credit so a handful of ordinary-noise regions can't stack up into a high aggregate score.
+    """
     max_diff = region.get("max_difference", 0)
     key_multiplier = 1.45 if region.get("is_key_field") else 1.0
     threshold_used = region.get("threshold_used", 20)
@@ -104,15 +111,12 @@ def _score_region_ela(region: dict) -> float:
     if region.get("anomaly_detected"):
         base = 78.0 + max(0, max_diff - threshold_used) * 1.5
         return _clamp(base * key_multiplier)
-    if max_diff >= 18:
-        base = 42.0 + (max_diff - 18) * 1.7
+
+    margin_below_threshold = threshold_used - max_diff
+    if margin_below_threshold <= 4:
+        base = 10.0 + max(0, 4 - margin_below_threshold) * 2.0
         return _clamp(base * key_multiplier)
-    if region.get("is_key_field") and max_diff >= 12:
-        base = 20.0 + (max_diff - 12) * 2.0
-        return _clamp(base * key_multiplier)
-    if max_diff >= 10:
-        base = 12.0 + (max_diff - 10) * 1.5
-        return _clamp(base * key_multiplier)
+
     return 0.0
 
 

@@ -7,7 +7,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("TypographyDetector")
 
 
-def _otsu_threshold(pixels: np.ndarray) -> float:
+def _otsu_threshold(pixels: np.ndarray) -> tuple[float, float]:
+    """
+    Returns (threshold, between_class_variance) so callers can gauge how reliable the
+    split actually is (a near-blank or otherwise low-contrast crop has a low between-class
+    variance and shouldn't be trusted).
+    """
     histogram, _ = np.histogram(pixels, bins=256, range=(0, 256))
     total = int(pixels.size)
     sum_total = float(np.dot(np.arange(256), histogram))
@@ -34,7 +39,11 @@ def _otsu_threshold(pixels: np.ndarray) -> float:
             best_variance = between_variance
             best_threshold = float(threshold)
 
-    return best_threshold
+    # Normalize into roughly [0, 1]: 1.0 would be a perfect 50/50 split spanning the
+    # full 0-255 range, so the result is comparable across crops of different sizes.
+    max_possible_variance = (total ** 2) * (255.0 ** 2) / 4.0
+    separability = best_variance / max_possible_variance if max_possible_variance > 0 and best_variance > 0 else 0.0
+    return best_threshold, separability
 
 
 class TypographyDetector:
@@ -51,11 +60,19 @@ class TypographyDetector:
     Z_SCORE_THRESHOLD = 3.5
     MIN_CROP_SIZE = 6
     CROP_PADDING = 3
+    MIN_SEPARABILITY = 0.03
 
     def _bucket_for(self, region: dict) -> str | None:
+        """
+        Only true currency/date fields are compared against each other. Generic numeric
+        strings (account numbers, CUIL/CUIT, reference codes) are excluded from the
+        "amounts" bucket even when `is_key_field` — they aren't rendered the same way as
+        monetary amounts, so mixing them in would contaminate the population with
+        unrelated glyph shapes and trigger false positives.
+        """
         if region.get("is_date"):
             return "dates"
-        if region.get("is_numeric") or region.get("is_key_field"):
+        if region.get("is_amount"):
             return "amounts"
         return None
 
@@ -74,9 +91,26 @@ class TypographyDetector:
         if pixels.size == 0:
             return None
 
-        threshold = _otsu_threshold(pixels.astype(np.uint8))
-        ink_mask = pixels < threshold
-        ink_ratio = float(ink_mask.mean())
+        threshold, separability = _otsu_threshold(pixels.astype(np.uint8))
+        if separability < self.MIN_SEPARABILITY:
+            # No reliable bimodal split (e.g. a near-blank cell, or a low-contrast crop) —
+            # any feature computed here would be noise, so skip this field entirely
+            # instead of feeding a garbage sample into the bucket's statistics.
+            return None
+
+        below_mask = pixels < threshold
+        below_ratio = float(below_mask.mean())
+        # Text strokes are the minority of pixels in a tight crop, whether the field is
+        # dark-on-light (a printed receipt) or light-on-dark (a highlighted "Total" row
+        # in a homebanking screenshot) — always treat the smaller side as "ink" instead
+        # of assuming dark-on-light, which would otherwise flag every inverted-contrast
+        # UI row as a typography anomaly.
+        if below_ratio <= 0.5:
+            ink_mask = below_mask
+            ink_ratio = below_ratio
+        else:
+            ink_mask = ~below_mask
+            ink_ratio = 1.0 - below_ratio
 
         if ink_mask.any():
             ink_pixels = pixels[ink_mask]
