@@ -1,5 +1,5 @@
 fastapi==0.135.3
-numpy
+numpy==1.26.4
 Pillow==12.2.0
 Requests==2.33.1
 streamlit==1.56.0

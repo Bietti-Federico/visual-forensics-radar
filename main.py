@@ -96,37 +96,53 @@ def _score_global_ela(max_diff: int, anomaly_detected: bool, threshold_used: int
     return 0.0
 
 
+def _score_region_ela(region: dict) -> float:
+    max_diff = region.get("max_difference", 0)
+    key_multiplier = 1.45 if region.get("is_key_field") else 1.0
+    threshold_used = region.get("threshold_used", 20)
+
+    if region.get("anomaly_detected"):
+        base = 78.0 + max(0, max_diff - threshold_used) * 1.5
+        return _clamp(base * key_multiplier)
+    if max_diff >= 18:
+        base = 42.0 + (max_diff - 18) * 1.7
+        return _clamp(base * key_multiplier)
+    if region.get("is_key_field") and max_diff >= 12:
+        base = 20.0 + (max_diff - 12) * 2.0
+        return _clamp(base * key_multiplier)
+    if max_diff >= 10:
+        base = 12.0 + (max_diff - 10) * 1.5
+        return _clamp(base * key_multiplier)
+    return 0.0
+
+
+def _ranked_local_ela_regions(local_ela_results: list[dict[str, Any]]) -> list[tuple[float, dict]]:
+    """
+    Scores every region the same way `_score_local_ela` does internally, but keeps the
+    region alongside its score so callers (e.g. the primary-reason explainer) can point
+    at the exact region driving the score instead of re-deriving the logic and getting
+    out of sync with it — a region can score well above zero without `anomaly_detected`
+    being True (see the `max_diff >= 18` branch), so filtering on that flag alone misses it.
+    """
+    scored = [(_score_region_ela(region), region) for region in local_ela_results]
+    scored = [(score, region) for score, region in scored if score > 0]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return scored
+
+
+def _top_local_ela_region(local_ela_results: list[dict[str, Any]]) -> dict | None:
+    ranked = _ranked_local_ela_regions(local_ela_results)
+    return ranked[0][1] if ranked else None
+
+
 def _score_local_ela(local_ela_results: list[dict[str, Any]]) -> float:
     if not local_ela_results:
         return 0.0
 
-    weighted_region_scores = []
-    for region in local_ela_results:
-        region_score = 0.0
-        max_diff = region.get("max_difference", 0)
-        key_multiplier = 1.45 if region.get("is_key_field") else 1.0
-        threshold_used = region.get("threshold_used", 20)
-
-        if region.get("anomaly_detected"):
-            base = 78.0 + max(0, max_diff - threshold_used) * 1.5
-            region_score = _clamp(base * key_multiplier)
-        elif max_diff >= 18:
-            base = 42.0 + (max_diff - 18) * 1.7
-            region_score = _clamp(base * key_multiplier)
-        elif region.get("is_key_field") and max_diff >= 12:
-            base = 20.0 + (max_diff - 12) * 2.0
-            region_score = _clamp(base * key_multiplier)
-        elif max_diff >= 10:
-            base = 12.0 + (max_diff - 10) * 1.5
-            region_score = _clamp(base * key_multiplier)
-
-        if region_score > 0:
-            weighted_region_scores.append(region_score)
-
+    weighted_region_scores = [score for score, _ in _ranked_local_ela_regions(local_ela_results)]
     if not weighted_region_scores:
         return 0.0
 
-    weighted_region_scores.sort(reverse=True)
     top = weighted_region_scores[:4]
     aggregate = top[0]
     if len(top) > 1:
@@ -304,8 +320,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         if contributions[winning_component] <= 0.5:
             decision["primary_reason"] = "Sin señales de peso relevante detectadas."
         elif winning_component == "local_ela":
-            key_hit = next((r for r in local_ela_results if r.get("is_key_field") and r.get("anomaly_detected")), None)
-            top_region = key_hit or next((r for r in local_ela_results if r.get("anomaly_detected")), None)
+            top_region = _top_local_ela_region(local_ela_results)
             field_text = (top_region or {}).get("text") or "sin identificar"
             decision["primary_reason"] = f"Motivo principal: anomalía ELA en el campo '{field_text}' (mayor peso en el score)."
         elif winning_component == "typography":
