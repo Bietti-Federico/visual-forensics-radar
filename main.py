@@ -112,6 +112,14 @@ def _score_region_ela(region: dict) -> float:
         base = 78.0 + max(0, max_diff - threshold_used) * 1.5
         return _clamp(base * key_multiplier)
 
+    if max_diff > threshold_used:
+        # Cleared the absolute threshold but was downgraded by the relative, document-wide
+        # calibration (not an outlier vs. its own document's peers) — still worth a modest,
+        # CAPPED amount of attention. Without this branch the margin-based formula below
+        # would keep growing the further max_diff sits above threshold_used, which defeats
+        # the point of downgrading it in the first place.
+        return _clamp(30.0 * key_multiplier)
+
     margin_below_threshold = threshold_used - max_diff
     if margin_below_threshold <= 4:
         base = 10.0 + max(0, 4 - margin_below_threshold) * 2.0
@@ -121,23 +129,28 @@ def _score_region_ela(region: dict) -> float:
 
 
 MIN_LOCAL_ELA_SAMPLES = 6
-RELATIVE_ELA_Z_THRESHOLD = 3.5
+RELATIVE_ELA_Z_THRESHOLD = 2.5
 
 
-def _leave_one_out_z_score(values: list[float], index: int) -> float:
+def _leave_one_out_z_score(values: list[float], index: int, mad_floor: float = 1.0) -> float:
     """
     Modified (Iglewicz-Hoaglin) z-score of values[index] against the median/MAD of every
     OTHER value in the list, so a field is never compared against a population that
     includes itself. Mirrors the same robust-stats approach used in typography_detector.py.
+
+    ELA's max_difference is a small integer (typically 10-20 for ordinary noise), so it's
+    common for more than half the fields in a document to land on the exact same value —
+    that alone makes MAD collapse to 0, which would otherwise make every z-score 0.0
+    (even for a field that's genuinely a bit off from the rest). `mad_floor` sets the
+    smallest deviation still treated as meaningful, so a real difference is measured
+    even when the bulk of the document ties on one number.
     """
     others = values[:index] + values[index + 1:]
     if len(others) < 2:
         return 0.0
 
     median = statistics.median(others)
-    mad = statistics.median([abs(v - median) for v in others])
-    if mad == 0:
-        return 0.0
+    mad = max(statistics.median([abs(v - median) for v in others]), mad_floor)
 
     return abs(0.6745 * (values[index] - median) / mad)
 
@@ -228,27 +241,46 @@ def _describe_typography_field(field: dict) -> str:
     return f"{feature_label} distinta en '{field.get('text')}' (z-score {field.get('max_abs_z')})"
 
 
+BBOX_MATCH_TOLERANCE_PX = 6.0
+
+
+def _bbox_center(bbox: tuple[float, float, float, float] | None) -> tuple[float, float] | None:
+    if not bbox:
+        return None
+    x1, y1, x2, y2 = bbox
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def _same_field_location(bbox_a: tuple | None, bbox_b: tuple | None, tolerance: float = BBOX_MATCH_TOLERANCE_PX) -> bool:
+    center_a, center_b = _bbox_center(bbox_a), _bbox_center(bbox_b)
+    if center_a is None or center_b is None:
+        return False
+    return abs(center_a[0] - center_b[0]) <= tolerance and abs(center_a[1] - center_b[1]) <= tolerance
+
+
 def _find_corroborated_field(local_ela_results: list[dict], typography_result: dict) -> dict | None:
     """
-    Cross-references ELA-local anomalies with typography anomalies by field text.
-    A key field flagged by BOTH independent methods is a much stronger signal of
-    an edited value than either one alone, and is the basis for the score floor
-    and headline alert below.
+    Cross-references ELA-local anomalies with typography anomalies by field POSITION
+    (bbox center), not text. Matching by text alone would let two different physical
+    occurrences of the same value (e.g. a duplicated two-column ticket) cross-match
+    each other and falsely count as "corroborated", even though neither field was
+    independently confirmed by both methods. A key field flagged by BOTH methods AT
+    THE SAME LOCATION is a much stronger signal of an edited value than either one
+    alone, and is the basis for the score floor and headline alert below.
     """
-    typography_anomalies = {
-        (field.get("text") or "").strip().lower(): field
-        for field in typography_result.get("anomalous_fields", [])
+    typography_key_anomalies = [
+        field for field in typography_result.get("anomalous_fields", [])
         if field.get("is_key_field")
-    }
-    if not typography_anomalies:
+    ]
+    if not typography_key_anomalies:
         return None
 
     for region in local_ela_results:
         if not (region.get("is_key_field") and region.get("anomaly_detected")):
             continue
-        key = (region.get("text") or "").strip().lower()
-        if key and key in typography_anomalies:
-            return {"text": region.get("text"), "ela_region": region, "typography_field": typography_anomalies[key]}
+        for field in typography_key_anomalies:
+            if _same_field_location(region.get("bbox"), field.get("bbox")):
+                return {"text": region.get("text"), "ela_region": region, "typography_field": field}
 
     return None
 
@@ -562,6 +594,10 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
         local_ela["is_key_field"] = bool(candidate.get("is_key_field", False))
         local_ela["priority"] = candidate.get("priority", 0)
         local_ela["line_text"] = candidate.get("line_text", "")
+        # Original (unpadded) candidate bbox, kept alongside the padded "crop_box" ELA
+        # itself already returns — used to match this field against typography's
+        # anomalies by position rather than by text.
+        local_ela["bbox"] = bbox
         local_ela_regions.append(local_ela)
 
     _apply_relative_ela_calibration(local_ela_regions)

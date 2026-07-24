@@ -92,7 +92,11 @@ class ElaDetector:
         from disk on every call.
         """
         if isinstance(image_source, Image.Image):
-            return image_source.convert("RGB")
+            # Image.convert() returns a full copy even when the mode already matches —
+            # with a shared photo reused across 12 crops per request, that's a full-size
+            # in-memory copy 12 times over for nothing. crop() further down never mutates
+            # the source, so it's safe to hand back the same object untouched.
+            return image_source if image_source.mode == "RGB" else image_source.convert("RGB")
         return Image.open(image_source).convert("RGB")
 
     def analyze(self, image_source: str | Image.Image, output_path: str | None = None, anomaly_threshold: int | None = None) -> dict:

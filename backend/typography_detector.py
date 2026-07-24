@@ -62,6 +62,7 @@ class TypographyDetector:
     CROP_PADDING = 3
     MIN_SEPARABILITY = 0.03
     MIN_INK_PIXELS_FOR_SHAPE = 12
+    MIN_RELIABLE_SHAPE_SAMPLES = 3
 
     def _bucket_for(self, region: dict) -> str | None:
         """
@@ -121,7 +122,7 @@ class TypographyDetector:
             mean_ink_intensity = float(pixels.mean())
             ink_std = float(pixels.std())
 
-        slant_angle, aspect_ratio = self._shape_features(ink_mask)
+        slant_angle, aspect_ratio, shape_reliable = self._shape_features(ink_mask)
 
         return {
             "height_px": float(y2 - y1),
@@ -130,9 +131,10 @@ class TypographyDetector:
             "ink_std": ink_std,
             "slant_angle": slant_angle,
             "aspect_ratio": aspect_ratio,
+            "shape_reliable": shape_reliable,
         }
 
-    def _shape_features(self, ink_mask: np.ndarray) -> tuple[float, float]:
+    def _shape_features(self, ink_mask: np.ndarray) -> tuple[float, float, bool]:
         """
         Estimates font/handwriting shape from the ink pixels themselves, independent of
         density or glyph height:
@@ -142,12 +144,16 @@ class TypographyDetector:
         - aspect_ratio: width/height of the tight bounding box around the actual ink
           pixels (not the padded OCR bbox) — captures letter proportions, which differ
           between fonts even when overall glyph height matches.
-        Falls back to neutral defaults (0.0 slant, 1.0 aspect) when there isn't enough
-        ink to estimate either reliably.
+        Falls back to neutral defaults (0.0 slant, 1.0 aspect, reliable=False) when
+        there isn't enough ink to estimate either reliably — callers must exclude
+        unreliable fields from the comparison population instead of treating the
+        neutral default as a real measurement (a bucket where most fields are too
+        small to measure would otherwise make the few genuinely-measured fields look
+        like outliers just for being the only real numbers among placeholders).
         """
         ys, xs = np.nonzero(ink_mask)
         if ys.size < self.MIN_INK_PIXELS_FOR_SHAPE:
-            return 0.0, 1.0
+            return 0.0, 1.0, False
 
         width = float(xs.max() - xs.min() + 1)
         height = float(ys.max() - ys.min() + 1)
@@ -164,20 +170,50 @@ class TypographyDetector:
         else:
             slant_angle = float(np.degrees(0.5 * np.arctan2(2 * mu11, mu20 - mu02)))
 
-        return slant_angle, aspect_ratio
+        return slant_angle, aspect_ratio, True
 
-    def _leave_one_out_z_score(self, values: list[float], index: int) -> float:
+    def _leave_one_out_z_score(self, values: list[float], index: int, mad_floor: float = 0.0) -> float:
         """
         Modified (Iglewicz-Hoaglin) z-score of values[index] against the median/MAD
         of every OTHER value in the same bucket, so a field is never compared
-        against a population that includes itself.
+        against a population that includes itself. `mad_floor` sets the smallest
+        deviation still treated as meaningful — without it, if more than half the
+        bucket ties on the same value (common for e.g. `aspect_ratio` when several
+        fields fall back to the neutral 1.0 default), MAD collapses to 0 and every
+        z-score in the bucket goes silently to 0.0, even for a field that's genuinely
+        a bit off from the rest.
         """
         others = values[:index] + values[index + 1:]
         if len(others) < 2:
             return 0.0
 
         median = float(np.median(others))
-        mad = float(np.median(np.abs(np.array(others) - median)))
+        mad = max(float(np.median(np.abs(np.array(others) - median))), mad_floor)
+        if mad == 0:
+            return 0.0
+
+        return abs(0.6745 * (values[index] - median) / mad)
+
+    def _masked_leave_one_out_z_score(
+        self, values: list[float], reliable_mask: list[bool], index: int, mad_floor: float = 0.0
+    ) -> float:
+        """
+        Same as `_leave_one_out_z_score`, but the comparison population is restricted to
+        entries where `reliable_mask` is True. slant_angle/aspect_ratio fall back to a
+        neutral placeholder (not a real measurement) when a crop has too little ink —
+        comparing a real value against a population padded with placeholders (or an
+        unreliable value against anything) produces a z-score that looks confident but
+        is statistically meaningless, so both cases return 0.0 instead.
+        """
+        if not reliable_mask[index]:
+            return 0.0
+
+        others = [v for i, v in enumerate(values) if i != index and reliable_mask[i]]
+        if len(others) < self.MIN_RELIABLE_SHAPE_SAMPLES - 1:
+            return 0.0
+
+        median = float(np.median(others))
+        mad = max(float(np.median(np.abs(np.array(others) - median))), mad_floor)
         if mad == 0:
             return 0.0
 
@@ -226,15 +262,33 @@ class TypographyDetector:
             feature_series = {
                 "height": [entry["features"]["height_px"] for entry in entries],
                 "ink_ratio": [entry["features"]["ink_ratio"] for entry in entries],
+            }
+            # slant_angle/aspect_ratio fall back to a neutral placeholder when a crop
+            # lacks enough ink to measure — those entries must not be compared as if
+            # they were real values, in either direction (as the entry being judged, or
+            # as part of the reference population for another entry).
+            shape_reliable = [entry["features"]["shape_reliable"] for entry in entries]
+            masked_feature_series = {
                 "slant_angle": [entry["features"]["slant_angle"] for entry in entries],
                 "aspect_ratio": [entry["features"]["aspect_ratio"] for entry in entries],
+            }
+            # Smallest deviation still treated as meaningful, in each feature's own scale.
+            mad_floors = {
+                "height": 1.0,
+                "ink_ratio": 0.02,
+                "slant_angle": 1.0,
+                "aspect_ratio": 0.05,
             }
 
             for idx, entry in enumerate(entries):
                 z_scores = {
-                    name: self._leave_one_out_z_score(series, idx)
+                    name: self._leave_one_out_z_score(series, idx, mad_floor=mad_floors[name])
                     for name, series in feature_series.items()
                 }
+                z_scores.update({
+                    name: self._masked_leave_one_out_z_score(series, shape_reliable, idx, mad_floor=mad_floors[name])
+                    for name, series in masked_feature_series.items()
+                })
                 dominant_feature = max(z_scores, key=z_scores.get)
                 max_abs_z = z_scores[dominant_feature]
 

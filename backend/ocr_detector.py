@@ -57,8 +57,11 @@ class OCRDetector:
     RANGE_BOUNDARY_PATTERN = re.compile(r"\bdesde\b|\bhasta\b", re.IGNORECASE)
 
     PERIOD_VALUE_PATTERN = re.compile(
-        r"(?:(?P<mm>0?[1-9]|1[0-2])[\-/](?P<yyyy>\d{4}))"
-        r"|(?:(?P<yy2>\d{2})(?P<mm2>0[1-9]|1[0-2])\b)"
+        r"(?:(?<!\d)(?P<mm>0?[1-9]|1[0-2])[\-/](?P<yyyy>\d{4}))"
+        # (?<!\d) on the compact "yymm" form prevents it from reading the trailing 4
+        # digits of an unrelated longer number (e.g. a receipt/tramite number) that
+        # simply happens to end in a valid month.
+        r"|(?:(?<!\d)(?P<yy2>\d{2})(?P<mm2>0[1-9]|1[0-2])\b)"
         r"|(?:(?P<month_name>enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s*(?P<year_after_name>\d{4})?)",
         re.IGNORECASE,
     )
