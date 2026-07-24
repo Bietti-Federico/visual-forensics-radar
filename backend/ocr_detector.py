@@ -54,6 +54,8 @@ class OCRDetector:
         re.IGNORECASE,
     )
 
+    RANGE_BOUNDARY_PATTERN = re.compile(r"\bdesde\b|\bhasta\b", re.IGNORECASE)
+
     PERIOD_VALUE_PATTERN = re.compile(
         r"(?:(?P<mm>0?[1-9]|1[0-2])[\-/](?P<yyyy>\d{4}))"
         r"|(?:(?P<yy2>\d{2})(?P<mm2>0[1-9]|1[0-2])\b)"
@@ -529,6 +531,14 @@ class OCRDetector:
         """
         periods = []
         for keyword_match in self.PERIOD_KEYWORD_PATTERN.finditer(text_blob):
+            # "Desde"/"Hasta" mark a validity WINDOW (e.g. "Fecha Próximo Cobro Desde/Hasta"),
+            # not a restated period — its "hasta" end legitimately falls in the next month
+            # by design, so it must never be compared for equality against "Periodo
+            # Liquidado"/"Periodo Abonado" style fields.
+            context = text_blob[max(0, keyword_match.start() - 25):keyword_match.end() + 10]
+            if self.RANGE_BOUNDARY_PATTERN.search(context):
+                continue
+
             window = text_blob[keyword_match.end():keyword_match.end() + 40]
             value_match = self.PERIOD_VALUE_PATTERN.search(window)
             if not value_match:

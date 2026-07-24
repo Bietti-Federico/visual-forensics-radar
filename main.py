@@ -461,7 +461,10 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
         if not bbox:
             continue
         padded_bbox = _pad_bbox(tuple(bbox), image_width, image_height, padding=14)
-        local_threshold = 16 if candidate.get("is_key_field") else 20
+        # Photographed paper receipts (camera, not scanner) carry enough natural JPEG/print
+        # noise that a stricter threshold on key fields was producing false positives;
+        # 20 applies uniformly regardless of field type.
+        local_threshold = 20
         local_ela = models["ela"].analyze_crop(shared_image, padded_bbox, anomaly_threshold=local_threshold)
         local_ela["text"] = candidate.get("text", "")
         local_ela["region_type"] = candidate.get("type", "unknown")
