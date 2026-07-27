@@ -410,7 +410,7 @@ class OCRDetector:
             bank_name = self.extract_bank_name(text_blob_upper)
             card_numbers = self.extract_card_numbers(text_blob)
             masked_card_numbers = self.extract_masked_card_numbers(text_blob)
-            receipt_consistency = self.analyze_receipt_consistency(text_blob)
+            receipt_consistency = self.analyze_receipt_consistency(text_blob, mean_confidence)
 
             score = 0
             signals = []
@@ -586,7 +586,12 @@ class OCRDetector:
 
         return None, None, keyword_found
 
-    def analyze_receipt_consistency(self, text_blob: str) -> dict:
+    # Above this document-wide mean OCR confidence, a single field still failing to
+    # extract is surprising enough to treat as "something specific about this field",
+    # not "this photo is generally hard to read".
+    LOCALIZED_FAILURE_MIN_CONFIDENCE = 65.0
+
+    def analyze_receipt_consistency(self, text_blob: str, mean_confidence: float = 0.0) -> dict:
         text_lower = text_blob.lower()
         if not any(hint in text_lower for hint in self.RECEIPT_LABEL_HINTS):
             return {
@@ -595,26 +600,44 @@ class OCRDetector:
                 "consistency_score": 0,
                 "signals": [],
                 "fields": {},
+                "localized_unreadable_fields": [],
             }
 
         fields = {}
         signals = []
         score = 0
+        localized_unreadable_fields = []
 
         for field_name, patterns in self.RECEIPT_VALUE_PATTERNS.items():
             value, raw_value, keyword_found = self.extract_amount_after_keywords(text_blob, patterns)
             if value is not None:
                 fields[field_name] = {"value": value, "raw": raw_value}
             elif keyword_found:
-                # The label itself was found, but no valid amount could be read near it —
-                # e.g. a font OCR can't parse, which is exactly what an edited value
-                # might look like. Silence here would hide a field that needs a human
-                # to read manually, so it's surfaced as its own signal.
-                score += 1
                 display_name = self.FIELD_DISPLAY_NAMES.get(field_name, field_name)
-                signals.append(
-                    f"Se encontró la etiqueta '{display_name}' pero no se pudo leer su monto — revisar manualmente."
-                )
+                if mean_confidence >= self.LOCALIZED_FAILURE_MIN_CONFIDENCE:
+                    # The rest of the document reads fine, so THIS field's failure isn't
+                    # explained by general photo/OCR quality — a strong tell that it uses
+                    # a font Tesseract's model doesn't recognize, which is exactly what a
+                    # deliberately substituted value would look like. Weighted higher
+                    # than a generic "OCR struggled" miss, and tracked separately so the
+                    # decision engine can treat it as standalone strong evidence.
+                    score += 2
+                    localized_unreadable_fields.append(field_name)
+                    signals.append(
+                        f"Se encontró la etiqueta '{display_name}' pero no se pudo leer su monto, pese a que el "
+                        f"resto del documento se lee con buena confianza ({mean_confidence:.1f}%) — posible fuente "
+                        "sustituida deliberadamente, revisar manualmente."
+                    )
+                else:
+                    # The label itself was found, but no valid amount could be read near
+                    # it, and the whole document reads poorly — most likely generic photo
+                    # quality (blur, low light), not a targeted edit. Silence would still
+                    # hide a field that needs a human to read manually, so it's surfaced,
+                    # just with less weight than the localized case above.
+                    score += 1
+                    signals.append(
+                        f"Se encontró la etiqueta '{display_name}' pero no se pudo leer su monto — revisar manualmente."
+                    )
 
         haberes = fields.get("total_haberes", {}).get("value")
         descuentos = fields.get("total_descuentos", {}).get("value")
@@ -681,6 +704,7 @@ class OCRDetector:
             "consistency_score": min(score, 4),
             "signals": signals,
             "fields": fields,
+            "localized_unreadable_fields": localized_unreadable_fields,
         }
 
     def _normalize_period(self, match: re.Match) -> tuple[int, int] | None:

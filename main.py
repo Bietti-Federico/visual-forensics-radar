@@ -352,6 +352,14 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
 CROSS_FAMILY_FLOOR = 55.0
 CROSS_FAMILY_CONSISTENCY_THRESHOLD = 2
 
+# A key field's label reads fine but its value doesn't, while the REST of the document
+# reads with good confidence — the field's own unreadability isn't explained by general
+# photo/OCR quality, which is a real tell of a deliberately substituted font (exactly
+# what a hand-edited value might look like) rather than an OCR miss. Weighted between
+# the standalone-typography floor and the cross-family floor: it's a single-signal
+# standalone tell, but a more specific/surprising one than a generic OCR read failure.
+LOCALIZED_FONT_FAILURE_FLOOR = 50.0
+
 
 def _has_visual_key_field_anomaly(local_ela_results: list[dict], typography_result: dict) -> bool:
     if any(region.get("is_key_field") and region.get("anomaly_detected") for region in local_ela_results):
@@ -410,6 +418,10 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
     if cross_family_signal:
         final_score = max(final_score, CROSS_FAMILY_FLOOR)
 
+    localized_unreadable_fields = receipt_consistency.get("localized_unreadable_fields", [])
+    if localized_unreadable_fields:
+        final_score = max(final_score, LOCALIZED_FONT_FAILURE_FLOOR)
+
     band_key, band_label = _normalize_band(final_score)
 
     decision = {
@@ -455,6 +467,15 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             "dos familias de señal independientes (lógica y visual) apuntan al mismo documento."
         )
         decision["evidence"].append(cross_family_message)
+
+    localized_font_failure_message = None
+    if localized_unreadable_fields:
+        field_labels = ", ".join(localized_unreadable_fields)
+        localized_font_failure_message = (
+            f"No se pudo leer el monto de '{field_labels}' pese a que el resto del documento se lee con buena "
+            "confianza — posible fuente sustituida deliberadamente, no una falla genérica de OCR."
+        )
+        decision["evidence"].append(localized_font_failure_message)
 
     if final_score >= 60:
         decision["evidence"].append("Revisión prioritaria recomendada.")
@@ -511,6 +532,8 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         decision["primary_reason"] = strong_typography_message
     elif cross_family_message is not None:
         decision["primary_reason"] = cross_family_message
+    elif localized_font_failure_message is not None:
+        decision["primary_reason"] = localized_font_failure_message
     else:
         contributions = {name: weight * value for name, (weight, value) in weighted_components.items()}
         winning_component = max(contributions, key=contributions.get)
