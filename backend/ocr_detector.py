@@ -198,17 +198,98 @@ class OCRDetector:
         image = image.filter(ImageFilter.SHARPEN)
         return image, inverse_scale
 
+    def _extract_tokens_from_data(self, data: dict, inverse_scale: float, pass_name: str) -> list[dict]:
+        tokens = []
+        total_items = len(data.get("text", []))
+        for idx in range(total_items):
+            raw_text = str(data["text"][idx]).strip()
+            conf_raw = str(data.get("conf", ["-1"])[idx]).strip()
+            try:
+                confidence = float(conf_raw)
+            except Exception:
+                confidence = -1.0
+
+            if not raw_text or confidence < 0:
+                continue
+
+            x = int(data["left"][idx])
+            y = int(data["top"][idx])
+            w = int(data["width"][idx])
+            h = int(data["height"][idx])
+            # bbox is rescaled back to the original image's coordinate space,
+            # since Tesseract ran on a possibly downscaled copy.
+            bbox = (
+                int(x * inverse_scale),
+                int(y * inverse_scale),
+                int((x + w) * inverse_scale),
+                int((y + h) * inverse_scale),
+            )
+
+            block_num = int(data.get("block_num", [0])[idx])
+            par_num = int(data.get("par_num", [0])[idx])
+            line_num = int(data.get("line_num", [0])[idx])
+
+            tokens.append({
+                "text": raw_text,
+                "confidence": confidence,
+                "bbox": bbox,
+                "line_id": (pass_name, block_num, par_num, line_num),
+            })
+
+        return tokens
+
+    def _bbox_overlap_ratio(self, bbox_a: tuple, bbox_b: tuple) -> float:
+        ax1, ay1, ax2, ay2 = bbox_a
+        bx1, by1, bx2, by2 = bbox_b
+        inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+        inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+        inter_area = inter_w * inter_h
+        if inter_area == 0:
+            return 0.0
+        area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+        return inter_area / area_a
+
+    def _merge_ocr_passes(self, primary_tokens: list[dict], secondary_tokens: list[dict]) -> list[dict]:
+        """
+        PSM 6 (the primary pass) assumes a single uniform block of text, which can make
+        Tesseract drop text sitting inside a bordered/boxed cell entirely — seen in
+        practice as a boxed total silently missing while everything around it read
+        fine. PSM 11 ("sparse text, no particular order") has no such layout
+        assumption, so it runs as a second, purely ADDITIVE pass: anything it finds
+        that the primary pass already covers (by bbox overlap) is discarded, so this
+        can only add tokens the primary pass missed, never duplicate or replace one.
+        """
+        merged = list(primary_tokens)
+        for token in secondary_tokens:
+            overlaps_existing = any(
+                self._bbox_overlap_ratio(token["bbox"], existing["bbox"]) > 0.3
+                for existing in primary_tokens
+            )
+            if not overlaps_existing:
+                merged.append(token)
+        return merged
+
     def analyze(self, image_path: str) -> dict:
         try:
             image = Image.open(image_path)
             processed, inverse_scale = self._preprocess(image)
 
-            data = pytesseract.image_to_data(
+            primary_data = pytesseract.image_to_data(
                 processed,
                 output_type=pytesseract.Output.DICT,
                 config="--oem 1 --psm 6",
                 lang="spa+eng",
             )
+            secondary_data = pytesseract.image_to_data(
+                processed,
+                output_type=pytesseract.Output.DICT,
+                config="--oem 1 --psm 11",
+                lang="spa+eng",
+            )
+
+            primary_tokens = self._extract_tokens_from_data(primary_data, inverse_scale, "primary")
+            secondary_tokens = self._extract_tokens_from_data(secondary_data, inverse_scale, "secondary")
+            combined_tokens = self._merge_ocr_passes(primary_tokens, secondary_tokens)
 
             words: list[OcrWord] = []
             candidate_regions = []
@@ -218,38 +299,14 @@ class OCRDetector:
             token_entries = []
             line_text_map = {}
 
-            total_items = len(data.get("text", []))
-            for idx in range(total_items):
-                raw_text = str(data["text"][idx]).strip()
-                conf_raw = str(data.get("conf", ["-1"])[idx]).strip()
-                try:
-                    confidence = float(conf_raw)
-                except Exception:
-                    confidence = -1.0
-
-                if not raw_text or confidence < 0:
-                    continue
-
-                x = int(data["left"][idx])
-                y = int(data["top"][idx])
-                w = int(data["width"][idx])
-                h = int(data["height"][idx])
-                # bbox is rescaled back to the original image's coordinate space,
-                # since Tesseract ran on a possibly downscaled copy.
-                bbox = (
-                    int(x * inverse_scale),
-                    int(y * inverse_scale),
-                    int((x + w) * inverse_scale),
-                    int((y + h) * inverse_scale),
-                )
+            for token in combined_tokens:
+                raw_text = token["text"]
+                confidence = token["confidence"]
+                bbox = token["bbox"]
+                line_id = token["line_id"]
 
                 words.append(OcrWord(text=raw_text, confidence=confidence, bbox=bbox))
                 confidence_values.append(confidence)
-
-                block_num = int(data.get("block_num", [0])[idx])
-                par_num = int(data.get("par_num", [0])[idx])
-                line_num = int(data.get("line_num", [0])[idx])
-                line_id = (block_num, par_num, line_num)
 
                 line_text_map.setdefault(line_id, []).append(raw_text)
 
@@ -263,8 +320,6 @@ class OCRDetector:
 
                 if is_numeric:
                     numeric_tokens += 1
-                elif any(keyword in normalized for keyword in self.CRITICAL_KEYWORDS):
-                    pass
 
                 token_entries.append({
                     "text": raw_text,
