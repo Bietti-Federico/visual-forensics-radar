@@ -285,8 +285,25 @@ def _find_corroborated_field(local_ela_results: list[dict], typography_result: d
     return None
 
 
-STRONG_TYPOGRAPHY_Z_THRESHOLD = 8.0
+STRONG_TYPOGRAPHY_Z_THRESHOLD = 10.0
 STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES = 8
+STRONG_TYPOGRAPHY_MIN_FEATURES_AGREEING = 2
+STRONG_TYPOGRAPHY_FLOOR = 45.0
+
+
+def _typography_features_agree(field: dict) -> bool:
+    """
+    A single feature spiking (e.g. only `aspect_ratio`, which is still sensitive to
+    OCR punctuation/digit-count quirks even measured per-character) is exactly the
+    kind of one-off noise that's been producing false positives on otherwise clean
+    receipts. A genuine font/handwriting substitution should show up across more than
+    one rendering dimension — height, ink density, slant, proportions — so standalone
+    escalation (without ELA agreement) requires at least 2 of the 4 to independently
+    clear the base 3.5 anomaly threshold, not just the single dominant one.
+    """
+    z_scores = field.get("z_scores", {})
+    agreeing = sum(1 for z in z_scores.values() if z > 3.5)
+    return agreeing >= STRONG_TYPOGRAPHY_MIN_FEATURES_AGREEING
 
 
 def _strongest_typography_key_field(typography_result: dict) -> dict | None:
@@ -294,14 +311,15 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     A fraud pattern based purely on font/handwriting substitution (a receipt reprinted
     or hand-completed with a different tool) leaves NO compression trace for ELA to
     corroborate — requiring both signals to agree would systematically miss exactly
-    that pattern. A typography anomaly on a key field with a z-score far beyond the
-    3.5 flagging threshold (this checks >=8, more than double it) is treated as strong
-    standalone evidence in its own right, without needing ELA agreement.
-
-    A huge z-score computed over a tiny population (right at the 3-5 sample floor) is
-    NOT more trustworthy than a moderate one over a large population — small samples
-    are exactly where OCR noise and format quirks produce spuriously large z-scores.
-    This escalation only fires when the field's own bucket has a decent sample size.
+    that pattern. A typography anomaly on a key field is treated as evidence in its
+    own right (without needing ELA agreement) only when ALL of these hold:
+    - its z-score is far beyond the 3.5 flagging threshold (>=10, roughly triple it)
+    - at least 2 of its 4 rendering features independently agree it's anomalous
+    - its bucket has a decent sample size (small samples are exactly where OCR noise
+      and format quirks produce spuriously large single-feature z-scores)
+    Even so, this is treated as more moderate evidence than ELA+typography
+    corroboration — it lands the document in "sospechoso", not "altamente sospechoso"
+    outright, since it's still a single method's own internal signal.
     """
     buckets = typography_result.get("buckets", {})
     key_hits = [
@@ -309,6 +327,7 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
         if field.get("is_key_field")
         and field.get("max_abs_z", 0) >= STRONG_TYPOGRAPHY_Z_THRESHOLD
         and buckets.get(field.get("bucket"), {}).get("sample_count", 0) >= STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES
+        and _typography_features_agree(field)
     ]
     if not key_hits:
         return None
@@ -367,7 +386,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
 
     strong_typography_field = _strongest_typography_key_field(typography_result)
     if strong_typography_field is not None:
-        final_score = max(final_score, 60.0)
+        final_score = max(final_score, STRONG_TYPOGRAPHY_FLOOR)
 
     cross_family_signal = (
         receipt_consistency_score >= CROSS_FAMILY_CONSISTENCY_THRESHOLD

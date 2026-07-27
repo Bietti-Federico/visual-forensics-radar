@@ -303,9 +303,15 @@ class OCRDetector:
                     region_type = "key_numeric"
                     is_key_field = True
                 elif entry["is_numeric"] and has_key_hint:
+                    # Numeric and sitting near a receipt keyword, but not recognizably an
+                    # amount or date — typically a reference/ID number (BENEFICIO NRO,
+                    # CUENTA NRO, COMPROBANTE, CODIGO CAJERO...). There's no "expected
+                    # value" to judge a reference number against, so it's still analyzed
+                    # (kept as a candidate) but NOT treated as a key field — it must not
+                    # get the key-field ELA weight boost or trigger the strong-evidence
+                    # escalations meant for genuine amount/date tampering.
                     priority = 3
                     region_type = "line_numeric"
-                    is_key_field = True
                 elif entry["is_numeric"] and (entry["is_amount"] or effective_is_date):
                     priority = 2
                     region_type = "generic_numeric"

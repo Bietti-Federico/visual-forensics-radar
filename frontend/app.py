@@ -302,14 +302,24 @@ al reescaneo — y que por eso el ELA de compresión JPEG no detecta.
   campo (misma posición), el sistema la marca como corroborada y sube el score con
   más peso; y si además hay una inconsistencia lógica (período o aritmética) en el
   mismo recibo, eso también suma un piso adicional de score.
+- Si se marca una fracción demasiado grande de un bucket a la vez (más del 20%, con
+  al menos 3 campos), el sistema descarta todas esas anomalías: un cambio real afecta
+  un campo puntual, no un tercio del documento — muchos campos marcados juntos indican
+  que la comparación no es confiable para esa foto (ej. distorsión de perspectiva en
+  una tabla ancha), no que haya fraude generalizado.
                         """
                     )
 
                 for bucket_name, bucket_info in buckets.items():
-                    st.write(
-                        f"- Bucket `{bucket_name}`: {bucket_info.get('status')} "
-                        f"(n={bucket_info.get('sample_count', 0)})"
-                    )
+                    status = bucket_info.get("status")
+                    if status == "unreliable_population":
+                        st.write(
+                            f"- Bucket `{bucket_name}`: ⚠️ población no confiable "
+                            f"(n={bucket_info.get('sample_count', 0)}, "
+                            f"{bucket_info.get('suppressed_anomalies', 0)} anomalías descartadas por ser demasiadas a la vez)"
+                        )
+                    else:
+                        st.write(f"- Bucket `{bucket_name}`: {status} (n={bucket_info.get('sample_count', 0)})")
                 if anomalous_fields:
                     for field in anomalous_fields:
                         marker = "🔑" if field.get("is_key_field") else "•"
