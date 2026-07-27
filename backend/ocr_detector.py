@@ -137,6 +137,14 @@ class OCRDetector:
         "liquido": [r"LIQ\.?\s*(?:QUINCENA|MENSUAL)", r"TOTAL\s+LIQUIDO"],
     }
 
+    FIELD_DISPLAY_NAMES = {
+        "total_haberes": "Total Haberes",
+        "total_descuentos": "Total Descuentos",
+        "neto": "Neto",
+        "neto_a_cobrar": "Neto a Cobrar",
+        "liquido": "Líquido",
+    }
+
     RECEIPT_LABEL_HINTS = (
         "haberes",
         "descuentos",
@@ -545,11 +553,21 @@ class OCRDetector:
         except Exception:
             return None
 
-    def extract_amount_after_keywords(self, text_blob: str, keyword_patterns: list[str]) -> tuple[float | None, str | None]:
+    def extract_amount_after_keywords(self, text_blob: str, keyword_patterns: list[str]) -> tuple[float | None, str | None, bool]:
+        """
+        Returns (value, raw_text, keyword_found). `keyword_found` is True whenever the
+        label itself (e.g. "NETO") was located in the text, even if no valid amount
+        could be read nearby — distinguishing "this document doesn't have this field"
+        from "the label is there but its value is unreadable", which callers should
+        treat as a red flag in its own right (e.g. an unusual/edited font that OCR
+        can't parse), not silence.
+        """
+        keyword_found = False
         for keyword_pattern in keyword_patterns:
             match = re.search(keyword_pattern, text_blob, re.IGNORECASE)
             if not match:
                 continue
+            keyword_found = True
 
             start = match.end()
             window = text_blob[start:start + 120]
@@ -558,9 +576,9 @@ class OCRDetector:
                 raw_amount = amount_match.group(0)
                 parsed = self.parse_amount(raw_amount)
                 if parsed is not None:
-                    return parsed, raw_amount.strip()
+                    return parsed, raw_amount.strip(), True
 
-        return None, None
+        return None, None, keyword_found
 
     def analyze_receipt_consistency(self, text_blob: str) -> dict:
         text_lower = text_blob.lower()
@@ -578,9 +596,19 @@ class OCRDetector:
         score = 0
 
         for field_name, patterns in self.RECEIPT_VALUE_PATTERNS.items():
-            value, raw_value = self.extract_amount_after_keywords(text_blob, patterns)
+            value, raw_value, keyword_found = self.extract_amount_after_keywords(text_blob, patterns)
             if value is not None:
                 fields[field_name] = {"value": value, "raw": raw_value}
+            elif keyword_found:
+                # The label itself was found, but no valid amount could be read near it —
+                # e.g. a font OCR can't parse, which is exactly what an edited value
+                # might look like. Silence here would hide a field that needs a human
+                # to read manually, so it's surfaced as its own signal.
+                score += 1
+                display_name = self.FIELD_DISPLAY_NAMES.get(field_name, field_name)
+                signals.append(
+                    f"Se encontró la etiqueta '{display_name}' pero no se pudo leer su monto — revisar manualmente."
+                )
 
         haberes = fields.get("total_haberes", {}).get("value")
         descuentos = fields.get("total_descuentos", {}).get("value")
