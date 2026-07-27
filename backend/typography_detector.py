@@ -1,4 +1,5 @@
 import logging
+import re
 
 import numpy as np
 from PIL import Image
@@ -64,17 +65,24 @@ class TypographyDetector:
     MIN_COMPONENT_PIXELS = 5
     MIN_RELIABLE_SHAPE_SAMPLES = 3
 
+    # A well-formed Argentine peso amount: optional "$", digits grouped by thousands
+    # with ".", exactly 2 decimal digits after ",". Table columns that aren't monetary
+    # amounts (quantities, percentages, day counts — e.g. "22.00" units) often still
+    # match the OCR-level looser `is_amount` pattern, but rarely this stricter shape;
+    # requiring it here keeps the "amounts" bucket to fields actually rendered as money.
+    WELL_FORMED_AMOUNT_PATTERN = re.compile(r"^\$?\s*\d{1,3}(\.\d{3})*,\d{2}$")
+
     def _bucket_for(self, region: dict) -> str | None:
         """
         Only true currency/date fields are compared against each other. Generic numeric
-        strings (account numbers, CUIL/CUIT, reference codes) are excluded from the
-        "amounts" bucket even when `is_key_field` — they aren't rendered the same way as
-        monetary amounts, so mixing them in would contaminate the population with
-        unrelated glyph shapes and trigger false positives.
+        strings (account numbers, CUIL/CUIT, reference codes, quantity/unit columns)
+        are excluded from the "amounts" bucket even when `is_key_field` — they aren't
+        rendered the same way as monetary amounts, so mixing them in would contaminate
+        the population with unrelated glyph shapes and trigger false positives.
         """
         if region.get("is_date"):
             return "dates"
-        if region.get("is_amount"):
+        if region.get("is_amount") and self.WELL_FORMED_AMOUNT_PATTERN.match((region.get("text") or "").strip()):
             return "amounts"
         return None
 

@@ -70,6 +70,17 @@ class OCRDetector:
 
     RANGE_BOUNDARY_PATTERN = re.compile(r"\bdesde\b|\bhasta\b", re.IGNORECASE)
 
+    # Legal/reference lines (acta, acuerdo, artículo...) routinely contain date-shaped
+    # substrings ("A.A.16/06/19", "Ac.09/10") that are reference labels, not receipt
+    # dates — grammatically valid dates that happen to sit in the wrong kind of line.
+    REFERENCE_LINE_KEYWORDS = ("acta", "acuerdo", "art.", " art ", "resolucion", "resolución", "decreto", "ley ")
+
+    # A bbox straddling two adjacent table cells (common in tightly-packed screenshots)
+    # gets OCR'd as one garbled token concatenating both values, e.g. "342,902.340,25"
+    # merging "342,90" and "2.340,25" — two or more decimal endings, or more than one
+    # currency sign, in a single token reliably signals this rather than a real field.
+    MERGED_TOKEN_PATTERN = re.compile(r",\d{2}")
+
     PERIOD_VALUE_PATTERN = re.compile(
         r"(?:(?<!\d)(?P<mm>0?[1-9]|1[0-2])[\-/](?P<yyyy>\d{4}))"
         # (?<!\d) on the compact "yymm" form prevents it from reading the trailing 4
@@ -257,11 +268,20 @@ class OCRDetector:
                 if not entry["is_numeric"] and not has_key_hint:
                     continue
 
+                # A bbox that merged two adjacent cells into one garbled token isn't a
+                # real field at all — analyzing it with ELA/typography would just
+                # measure a meaningless crop spanning a cell boundary.
+                if len(self.MERGED_TOKEN_PATTERN.findall(entry["text"])) >= 2 or entry["text"].count("$") >= 2:
+                    continue
+
+                is_reference_line = any(keyword in line_text for keyword in self.REFERENCE_LINE_KEYWORDS)
+                effective_is_date = entry["is_date"] and not is_reference_line
+
                 priority = 0
                 region_type = "context"
                 is_key_field = False
 
-                if entry["is_numeric"] and (entry["is_amount"] or entry["is_date"]) and has_key_hint:
+                if entry["is_numeric"] and (entry["is_amount"] or effective_is_date) and has_key_hint:
                     priority = 4
                     region_type = "key_numeric"
                     is_key_field = True
@@ -269,7 +289,7 @@ class OCRDetector:
                     priority = 3
                     region_type = "line_numeric"
                     is_key_field = True
-                elif entry["is_numeric"] and (entry["is_amount"] or entry["is_date"]):
+                elif entry["is_numeric"] and (entry["is_amount"] or effective_is_date):
                     priority = 2
                     region_type = "generic_numeric"
                 elif has_key_hint:
@@ -284,7 +304,7 @@ class OCRDetector:
                         "priority": priority,
                         "is_key_field": is_key_field,
                         "is_numeric": entry["is_numeric"],
-                        "is_date": entry["is_date"],
+                        "is_date": effective_is_date,
                         "is_amount": entry["is_amount"],
                         "line_text": " ".join(line_tokens)[:220],
                     })

@@ -286,6 +286,7 @@ def _find_corroborated_field(local_ela_results: list[dict], typography_result: d
 
 
 STRONG_TYPOGRAPHY_Z_THRESHOLD = 8.0
+STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES = 8
 
 
 def _strongest_typography_key_field(typography_result: dict) -> dict | None:
@@ -296,10 +297,18 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     that pattern. A typography anomaly on a key field with a z-score far beyond the
     3.5 flagging threshold (this checks >=8, more than double it) is treated as strong
     standalone evidence in its own right, without needing ELA agreement.
+
+    A huge z-score computed over a tiny population (right at the 3-5 sample floor) is
+    NOT more trustworthy than a moderate one over a large population — small samples
+    are exactly where OCR noise and format quirks produce spuriously large z-scores.
+    This escalation only fires when the field's own bucket has a decent sample size.
     """
+    buckets = typography_result.get("buckets", {})
     key_hits = [
         field for field in typography_result.get("anomalous_fields", [])
-        if field.get("is_key_field") and field.get("max_abs_z", 0) >= STRONG_TYPOGRAPHY_Z_THRESHOLD
+        if field.get("is_key_field")
+        and field.get("max_abs_z", 0) >= STRONG_TYPOGRAPHY_Z_THRESHOLD
+        and buckets.get(field.get("bucket"), {}).get("sample_count", 0) >= STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES
     ]
     if not key_hits:
         return None
