@@ -1,5 +1,7 @@
 import logging
 import os
+
+import numpy as np
 from PIL import Image, ExifTags
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -22,6 +24,55 @@ class MetadataDetector:
         "snapseed",
         "affinity",
     )
+
+    CORNER_DISTANCE_THRESHOLD = 60.0
+    SATURATION_THRESHOLD = 40.0
+
+    def _estimate_capture_mode(self, image: Image.Image) -> dict:
+        """
+        Distinguishes a photo of a physical document (paper on a table/tablecloth,
+        background visible around it, natural lighting and a slight off-axis angle)
+        from a flat digital source (a screenshot or rendered PDF, usually a uniform
+        light background filling the frame edge-to-edge). Typography naturally has
+        more baseline variance in a photo — paper curvature, shadows, perspective —
+        so this lets typography relax its anomaly thresholds for physical photos
+        instead of holding them to the same strictness as a flat digital render.
+        """
+        try:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            patch = max(10, min(width, height) // 12)
+
+            corners = [
+                rgb.crop((0, 0, patch, patch)),
+                rgb.crop((width - patch, 0, width, patch)),
+                rgb.crop((0, height - patch, patch, height)),
+                rgb.crop((width - patch, height - patch, width, height)),
+            ]
+            corner_means = [
+                np.asarray(corner, dtype=np.float64).reshape(-1, 3).mean(axis=0)
+                for corner in corners
+            ]
+            # A scan/screenshot's corners are usually near-white; a photo's corners
+            # show whatever surface the document was placed on.
+            max_corner_distance = max(float(np.linalg.norm(mean - 255.0)) for mean in corner_means)
+
+            saturation = np.asarray(rgb.convert("HSV"), dtype=np.float64)[:, :, 1]
+            mean_saturation = float(saturation.mean())
+
+            is_photo = (
+                max_corner_distance > self.CORNER_DISTANCE_THRESHOLD
+                or mean_saturation > self.SATURATION_THRESHOLD
+            )
+
+            return {
+                "capture_mode": "photo" if is_photo else "digital_or_scan",
+                "max_corner_distance_from_white": round(max_corner_distance, 1),
+                "mean_saturation": round(mean_saturation, 1),
+            }
+        except Exception as e:
+            logger.error(f"Error estimating capture mode: {str(e)}")
+            return {"capture_mode": "digital_or_scan", "max_corner_distance_from_white": None, "mean_saturation": None}
 
     def analyze(self, image_path: str) -> dict:
         try:
@@ -81,6 +132,8 @@ class MetadataDetector:
                 score += 1
                 suspicious_signals.append(f"Formato poco habitual para un recibo: {image.format}.")
 
+            capture_mode_info = self._estimate_capture_mode(image)
+
             result = {
                 "status": "success",
                 "file_size_bytes": file_size,
@@ -94,6 +147,7 @@ class MetadataDetector:
                 "datetime_original": datetime_original,
                 "suspicious_signals": suspicious_signals,
                 "metadata_score": min(score, 4),
+                **capture_mode_info,
             }
 
             logger.info("Metadata analysis complete.")

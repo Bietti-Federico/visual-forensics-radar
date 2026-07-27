@@ -67,6 +67,13 @@ class TypographyDetector:
     MIN_ANOMALIES_FOR_FRACTION_CHECK = 3
     MAX_ANOMALY_FRACTION = 0.2
 
+    # A photographed paper document has more baseline typography variance than a flat
+    # digital scan/screenshot — paper curvature, shadows, a slight off-axis angle all
+    # shift height/ink/slant/aspect a bit even with zero editing. Relax (not disable)
+    # the anomaly bar for photos rather than holding every capture mode to the same
+    # strictness.
+    PHOTO_Z_THRESHOLD_MULTIPLIER = 1.3
+
     # A well-formed Argentine peso amount: optional "$", digits grouped by thousands
     # with ".", exactly 2 decimal digits after ",". Table columns that aren't monetary
     # amounts (quantities, percentages, day counts — e.g. "22.00" units) often still
@@ -272,7 +279,12 @@ class TypographyDetector:
 
         return abs(0.6745 * (values[index] - median) / mad)
 
-    def analyze(self, image_source: str | Image.Image, candidate_regions: list[dict]) -> dict:
+    def analyze(
+        self,
+        image_source: str | Image.Image,
+        candidate_regions: list[dict],
+        capture_mode: str = "digital_or_scan",
+    ) -> dict:
         try:
             if isinstance(image_source, Image.Image):
                 image = image_source.convert("L")
@@ -281,6 +293,14 @@ class TypographyDetector:
         except Exception as e:
             logger.error(f"Error opening image for typography analysis: {str(e)}")
             return {"status": "error", "message": str(e)}
+
+        # Computed once per call (never mutates self.Z_SCORE_THRESHOLD, since this
+        # detector instance is shared across concurrent requests).
+        z_threshold = (
+            self.Z_SCORE_THRESHOLD * self.PHOTO_Z_THRESHOLD_MULTIPLIER
+            if capture_mode == "photo"
+            else self.Z_SCORE_THRESHOLD
+        )
 
         buckets: dict[str, list[dict]] = {"amounts": [], "dates": []}
 
@@ -348,7 +368,7 @@ class TypographyDetector:
                 entry["z_scores"] = {name: round(z, 2) for name, z in z_scores.items()}
                 entry["max_abs_z"] = round(max_abs_z, 2)
                 entry["dominant_feature"] = dominant_feature
-                entry["typography_anomaly"] = max_abs_z > self.Z_SCORE_THRESHOLD
+                entry["typography_anomaly"] = max_abs_z > z_threshold
                 entry["bucket"] = bucket_name
 
             bucket_anomalies = [entry for entry in entries if entry["typography_anomaly"]]
@@ -382,6 +402,8 @@ class TypographyDetector:
             "status": "success",
             "buckets": bucket_summaries,
             "anomalous_fields": anomalous_fields,
+            "capture_mode": capture_mode,
+            "z_threshold_used": round(z_threshold, 2),
         }
         logger.info(f"Typography analysis complete. {len(anomalous_fields)} anomalous field(s) found.")
         return result

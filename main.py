@@ -289,9 +289,14 @@ STRONG_TYPOGRAPHY_Z_THRESHOLD = 10.0
 STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES = 8
 STRONG_TYPOGRAPHY_MIN_FEATURES_AGREEING = 2
 STRONG_TYPOGRAPHY_FLOOR = 45.0
+# Mirrors TypographyDetector.PHOTO_Z_THRESHOLD_MULTIPLIER — a photographed paper
+# document has more baseline typography variance (paper curvature, shadows, angle)
+# than a flat digital scan/screenshot, so this escalation's own threshold relaxes
+# the same way typography's base anomaly threshold already does.
+PHOTO_STRONG_TYPOGRAPHY_MULTIPLIER = 1.3
 
 
-def _typography_features_agree(field: dict) -> bool:
+def _typography_features_agree(field: dict, base_threshold: float) -> bool:
     """
     A single feature spiking (e.g. only `aspect_ratio`, which is still sensitive to
     OCR punctuation/digit-count quirks even measured per-character) is exactly the
@@ -299,10 +304,11 @@ def _typography_features_agree(field: dict) -> bool:
     receipts. A genuine font/handwriting substitution should show up across more than
     one rendering dimension — height, ink density, slant, proportions — so standalone
     escalation (without ELA agreement) requires at least 2 of the 4 to independently
-    clear the base 3.5 anomaly threshold, not just the single dominant one.
+    clear the base anomaly threshold (already photo-adjusted upstream), not just the
+    single dominant one.
     """
     z_scores = field.get("z_scores", {})
-    agreeing = sum(1 for z in z_scores.values() if z > 3.5)
+    agreeing = sum(1 for z in z_scores.values() if z > base_threshold)
     return agreeing >= STRONG_TYPOGRAPHY_MIN_FEATURES_AGREEING
 
 
@@ -313,7 +319,8 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     corroborate — requiring both signals to agree would systematically miss exactly
     that pattern. A typography anomaly on a key field is treated as evidence in its
     own right (without needing ELA agreement) only when ALL of these hold:
-    - its z-score is far beyond the 3.5 flagging threshold (>=10, roughly triple it)
+    - its z-score is far beyond the base flagging threshold (>=10, roughly triple it;
+      relaxed further for a photographed physical document, same as the base check)
     - at least 2 of its 4 rendering features independently agree it's anomalous
     - its bucket has a decent sample size (small samples are exactly where OCR noise
       and format quirks produce spuriously large single-feature z-scores)
@@ -321,13 +328,21 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     corroboration — it lands the document in "sospechoso", not "altamente sospechoso"
     outright, since it's still a single method's own internal signal.
     """
+    capture_mode = typography_result.get("capture_mode", "digital_or_scan")
+    z_threshold_used = typography_result.get("z_threshold_used", 3.5)
+    strong_threshold = (
+        STRONG_TYPOGRAPHY_Z_THRESHOLD * PHOTO_STRONG_TYPOGRAPHY_MULTIPLIER
+        if capture_mode == "photo"
+        else STRONG_TYPOGRAPHY_Z_THRESHOLD
+    )
+
     buckets = typography_result.get("buckets", {})
     key_hits = [
         field for field in typography_result.get("anomalous_fields", [])
         if field.get("is_key_field")
-        and field.get("max_abs_z", 0) >= STRONG_TYPOGRAPHY_Z_THRESHOLD
+        and field.get("max_abs_z", 0) >= strong_threshold
         and buckets.get(field.get("bucket"), {}).get("sample_count", 0) >= STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES
-        and _typography_features_agree(field)
+        and _typography_features_agree(field, z_threshold_used)
     ]
     if not key_hits:
         return None
@@ -663,11 +678,13 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
 
     _apply_relative_ela_calibration(local_ela_regions)
 
+    capture_mode = metadata_res.get("capture_mode", "digital_or_scan")
+
     if candidate_regions:
         logger.info("Step 5: Running Typography Consistency Analysis...")
-        typography_res = models["typography"].analyze(shared_image, candidate_regions)
+        typography_res = models["typography"].analyze(shared_image, candidate_regions, capture_mode=capture_mode)
     else:
-        typography_res = {"status": "success", "buckets": {}, "anomalous_fields": []}
+        typography_res = {"status": "success", "buckets": {}, "anomalous_fields": [], "capture_mode": capture_mode}
 
     return build_receipt_response(file_name, type_result, ela_res, metadata_res, ocr_res, local_ela_regions, typography_res)
 

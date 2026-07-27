@@ -206,6 +206,17 @@ def render_analysis_result(index, uploaded_file, data):
                 if software:
                     st.write(f"**Software:** {software}")
 
+                capture_mode = metadata_data.get("capture_mode")
+                if capture_mode:
+                    label = "📷 Foto física (fondo/mesa visible)" if capture_mode == "photo" else "💻 Digital / escaneo (fondo plano)"
+                    st.write(f"**Modo de captura detectado:** {label}")
+                    st.caption(
+                        f"distancia de esquina al blanco={metadata_data.get('max_corner_distance_from_white')} · "
+                        f"saturación media={metadata_data.get('mean_saturation')} — "
+                        "si se detecta foto física, tipografía relaja su umbral de anomalía (paper curvature, "
+                        "sombras y ángulo agregan variación normal que no es edición)."
+                    )
+
             with tab4:
                 ocr_data = diags.get("ocr_layer", {})
                 local_ela_regions = diags.get("ocr_local_ela_regions", [])
@@ -262,6 +273,9 @@ def render_analysis_result(index, uploaded_file, data):
                 anomalous_fields = typography_data.get("anomalous_fields", [])
                 st.markdown("**Typography consistency:**")
                 st.caption("Compares glyph height, ink density, slant and letter proportions of each field against the rest of the document.")
+                if typography_data.get("capture_mode"):
+                    mode_label = "foto física (umbral relajado)" if typography_data.get("capture_mode") == "photo" else "digital/escaneo (umbral estándar)"
+                    st.caption(f"Modo de captura: {mode_label} · z-score umbral usado: {typography_data.get('z_threshold_used')}")
 
                 with st.expander("¿Qué mide esta validación?"):
                     st.markdown(
