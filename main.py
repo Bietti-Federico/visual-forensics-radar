@@ -306,6 +306,16 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     return max(key_hits, key=lambda field: field.get("max_abs_z", 0))
 
 
+CROSS_FAMILY_FLOOR = 55.0
+CROSS_FAMILY_CONSISTENCY_THRESHOLD = 2
+
+
+def _has_visual_key_field_anomaly(local_ela_results: list[dict], typography_result: dict) -> bool:
+    if any(region.get("is_key_field") and region.get("anomaly_detected") for region in local_ela_results):
+        return True
+    return any(field.get("is_key_field") for field in typography_result.get("anomalous_fields", []))
+
+
 def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, local_ela_results: list[dict], typography_result: dict) -> dict:
     """
     Fast triage engine for receipt validation.
@@ -350,6 +360,13 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
     if strong_typography_field is not None:
         final_score = max(final_score, 60.0)
 
+    cross_family_signal = (
+        receipt_consistency_score >= CROSS_FAMILY_CONSISTENCY_THRESHOLD
+        and _has_visual_key_field_anomaly(local_ela_results, typography_result)
+    )
+    if cross_family_signal:
+        final_score = max(final_score, CROSS_FAMILY_FLOOR)
+
     band_key, band_label = _normalize_band(final_score)
 
     decision = {
@@ -387,6 +404,14 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             "Patrón típico de sustitución de fuente/caligrafía sin rastro de compresión JPEG que ELA pueda corroborar."
         )
         decision["evidence"].append(strong_typography_message)
+
+    cross_family_message = None
+    if cross_family_signal:
+        cross_family_message = (
+            "Inconsistencia lógica (período o aritmética) coincide con una anomalía visual en un campo clave: "
+            "dos familias de señal independientes (lógica y visual) apuntan al mismo documento."
+        )
+        decision["evidence"].append(cross_family_message)
 
     if final_score >= 60:
         decision["evidence"].append("Revisión prioritaria recomendada.")
@@ -441,6 +466,8 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         decision["primary_reason"] = corroboration_message
     elif strong_typography_message is not None:
         decision["primary_reason"] = strong_typography_message
+    elif cross_family_message is not None:
+        decision["primary_reason"] = cross_family_message
     else:
         contributions = {name: weight * value for name, (weight, value) in weighted_components.items()}
         winning_component = max(contributions, key=contributions.get)
@@ -579,7 +606,11 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
     image_width = metadata_res.get("width", 0)
     image_height = metadata_res.get("height", 0)
 
-    for candidate in candidate_regions[:12]:
+    # ELA local is cheap (crop + JPEG resave, no disk I/O since the image is already
+    # shared in memory), so we can afford to look at more than a handful of fields —
+    # widening this reduces the chance that the actually-tampered field simply didn't
+    # rank in the old top-12 and never got analyzed at all.
+    for candidate in candidate_regions[:20]:
         bbox = candidate.get("bbox")
         if not bbox:
             continue

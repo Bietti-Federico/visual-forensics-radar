@@ -192,12 +192,15 @@ independientes:
 - **Densidad de tinta** (`ink_ratio`): qué fracción del recorte es trazo de texto vs. fondo,
   detectando automáticamente si el texto es oscuro sobre claro o claro sobre oscuro
   (por ejemplo una fila de "Total" resaltada en homebanking).
-- **Inclinación / caligrafía** (`slant_angle`): el ángulo dominante del trazo, estimado
-  por momentos de imagen sobre los píxeles de tinta — distingue una fuente itálica,
-  cursiva o manuscrita insertada en medio de texto impreso derecho.
+- **Inclinación / caligrafía** (`slant_angle`): el ángulo dominante del trazo, medido
+  **por carácter individual** (cada dígito/letra se segmenta como su propia forma
+  conectada de tinta) y luego se toma la mediana entre los caracteres del campo —
+  distingue una fuente itálica, cursiva o manuscrita insertada en medio de texto
+  impreso derecho, sin diluirse por cuántos caracteres tiene el valor.
 - **Proporción de letra** (`aspect_ratio`): ancho/alto del recuadro ajustado a la tinta
-  (no el recuadro de OCR) — distingue una fuente con letras más angostas o anchas que
-  la que predomina en el resto del documento.
+  de **cada carácter** (no del campo completo) — así un monto de muchos dígitos no
+  aparenta ser "más ancho" solo por tener más dígitos; lo que se compara es la forma
+  real de la letra.
 
 Estas 4 métricas se comparan **contra los demás campos del mismo tipo en el mismo
 documento** (montos contra montos, fechas contra fechas — nunca un monto contra una
@@ -219,12 +222,15 @@ al reescaneo — y que por eso el ELA de compresión JPEG no detecta.
   `insufficient_population` y no genera señal.
 - Un recorte sin contraste confiable (celda casi en blanco, muy baja separación entre
   texto y fondo) se descarta directamente en vez de sumar ruido.
-- Inclinación y proporción necesitan una cantidad mínima de píxeles de tinta para
-  estimarse de forma confiable; si el trazo es demasiado chico, quedan en un valor
-  neutro (0° / 1:1) y no aportan señal para ese campo puntual.
+- Inclinación y proporción necesitan al menos un carácter con suficientes píxeles de
+  tinta para estimarse; si ningún carácter del campo alcanza ese mínimo, quedan en un
+  valor neutro (0° / 1:1) y se excluyen de la comparación (no se tratan como una
+  medición real ni contaminan la referencia de otros campos).
 - Es una señal de **triage para orientar la revisión humana**, no una prueba de
   edición por sí sola — cuando coincide con una anomalía de ELA local en el mismo
-  campo, el sistema la marca como corroborada y sube el score con más peso.
+  campo (misma posición), el sistema la marca como corroborada y sube el score con
+  más peso; y si además hay una inconsistencia lógica (período o aritmética) en el
+  mismo recibo, eso también suma un piso adicional de score.
                         """
                     )
 

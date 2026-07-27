@@ -61,7 +61,7 @@ class TypographyDetector:
     MIN_CROP_SIZE = 6
     CROP_PADDING = 3
     MIN_SEPARABILITY = 0.03
-    MIN_INK_PIXELS_FOR_SHAPE = 12
+    MIN_COMPONENT_PIXELS = 5
     MIN_RELIABLE_SHAPE_SAMPLES = 3
 
     def _bucket_for(self, region: dict) -> str | None:
@@ -134,27 +134,43 @@ class TypographyDetector:
             "shape_reliable": shape_reliable,
         }
 
-    def _shape_features(self, ink_mask: np.ndarray) -> tuple[float, float, bool]:
+    def _connected_components(self, mask: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
         """
-        Estimates font/handwriting shape from the ink pixels themselves, independent of
-        density or glyph height:
-        - slant_angle: dominant stroke angle (degrees) from the second-order image
-          moments of the ink mask — a font swap or handwritten digit typically has a
-          different slant than the printed/rendered text around it.
-        - aspect_ratio: width/height of the tight bounding box around the actual ink
-          pixels (not the padded OCR bbox) — captures letter proportions, which differ
-          between fonts even when overall glyph height matches.
-        Falls back to neutral defaults (0.0 slant, 1.0 aspect, reliable=False) when
-        there isn't enough ink to estimate either reliably — callers must exclude
-        unreliable fields from the comparison population instead of treating the
-        neutral default as a real measurement (a bucket where most fields are too
-        small to measure would otherwise make the few genuinely-measured fields look
-        like outliers just for being the only real numbers among placeholders).
+        Minimal 8-connectivity flood-fill labeling (no scipy dependency, crops are tiny
+        so a plain Python BFS is fast enough) to segment individual glyphs within the
+        ink mask. Needed because a multi-digit amount's overall ink bounding box is
+        dominated by how many digits it has, not by the shape of any single letter —
+        measuring the whole crop as one blob confounds string length with font shape.
         """
-        ys, xs = np.nonzero(ink_mask)
-        if ys.size < self.MIN_INK_PIXELS_FOR_SHAPE:
-            return 0.0, 1.0, False
+        visited = np.zeros_like(mask, dtype=bool)
+        height, width = mask.shape
+        neighbors = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+        components = []
 
+        for start_y in range(height):
+            for start_x in range(width):
+                if not mask[start_y, start_x] or visited[start_y, start_x]:
+                    continue
+
+                stack = [(start_y, start_x)]
+                visited[start_y, start_x] = True
+                ys_list, xs_list = [], []
+
+                while stack:
+                    y, x = stack.pop()
+                    ys_list.append(y)
+                    xs_list.append(x)
+                    for dy, dx in neighbors:
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and not visited[ny, nx]:
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
+
+                components.append((np.array(ys_list), np.array(xs_list)))
+
+        return components
+
+    def _component_shape(self, ys: np.ndarray, xs: np.ndarray) -> tuple[float, float]:
         width = float(xs.max() - xs.min() + 1)
         height = float(ys.max() - ys.min() + 1)
         aspect_ratio = width / height if height > 0 else 1.0
@@ -170,7 +186,34 @@ class TypographyDetector:
         else:
             slant_angle = float(np.degrees(0.5 * np.arctan2(2 * mu11, mu20 - mu02)))
 
-        return slant_angle, aspect_ratio, True
+        return slant_angle, aspect_ratio
+
+    def _shape_features(self, ink_mask: np.ndarray) -> tuple[float, float, bool]:
+        """
+        Estimates font/handwriting shape PER CHARACTER (each connected ink component),
+        then takes the median across characters found in the crop:
+        - slant_angle: dominant stroke angle (degrees) from second-order image moments
+          of a single glyph — a font swap or handwritten digit typically has a
+          different slant than the printed/rendered text around it.
+        - aspect_ratio: width/height of a single glyph's tight ink bounding box —
+          captures letter proportions, independent of how many characters the field has.
+        Falls back to neutral defaults (0.0 slant, 1.0 aspect, reliable=False) when no
+        component has enough ink to measure confidently — callers must exclude
+        unreliable fields from the comparison population instead of treating the
+        neutral default as a real measurement.
+        """
+        components = self._connected_components(ink_mask)
+        shapes = [
+            self._component_shape(ys, xs)
+            for ys, xs in components
+            if ys.size >= self.MIN_COMPONENT_PIXELS
+        ]
+        if not shapes:
+            return 0.0, 1.0, False
+
+        slants = [slant for slant, _ in shapes]
+        aspects = [aspect for _, aspect in shapes]
+        return float(np.median(slants)), float(np.median(aspects)), True
 
     def _leave_one_out_z_score(self, values: list[float], index: int, mad_floor: float = 0.0) -> float:
         """
