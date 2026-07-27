@@ -38,6 +38,72 @@ st.markdown('<p class="sub-header">Upload a suspicious image to run a fast triag
 
 uploaded_file = st.file_uploader("Upload Target Image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
+def build_audit_summary(file_name, data):
+    """
+    Condenses everything scattered across the tabs (evidence, flagged fields, receipt
+    consistency) into one compact, copy-pasteable block — so a reviewer doesn't have to
+    click through 5 tabs to get the gist of why a document was flagged.
+    """
+    decision = data.get("final_decision", {})
+    diags = data.get("diagnostics", {})
+    analysis_route = data.get("analysis_route", "unknown")
+    document_type = data.get("document_type", "unknown")
+    document_confidence = data.get("document_type_confidence", 0)
+
+    lines = [f"INFORME DE AUDITORÍA — {file_name}", "=" * 50]
+    lines.append(f"Tipo de documento: {document_type} ({document_confidence:.1f}%)")
+    lines.append(f"Ruta de análisis: {analysis_route}")
+
+    if analysis_route != "receipt_control":
+        lines.append("Este tipo de documento no recibe control de fraude (solo categorización).")
+        return "\n".join(lines)
+
+    score = decision.get("score")
+    score_text = f"{score:.1f}/100" if isinstance(score, (int, float)) else "N/A"
+    lines.append(f"Score de sospecha: {score_text} — {decision.get('risk_label', 'N/A')}")
+    lines.append("")
+
+    primary_reason = decision.get("primary_reason")
+    if primary_reason:
+        lines.append("MOTIVO PRINCIPAL:")
+        lines.append(f"  {primary_reason}")
+        lines.append("")
+
+    evidence = decision.get("evidence", [])
+    if evidence:
+        lines.append("EVIDENCIA:")
+        lines.extend(f"  - {item}" for item in evidence)
+        lines.append("")
+
+    ela_hits = [r for r in diags.get("ocr_local_ela_regions", []) if r.get("anomaly_detected")]
+    if ela_hits:
+        lines.append("CAMPOS SEÑALADOS POR ELA LOCAL:")
+        lines.extend(
+            f"  - '{region.get('text', '')}' (diff={region.get('max_difference', 0)}, "
+            f"z relativo={region.get('relative_z_score')})"
+            for region in ela_hits
+        )
+        lines.append("")
+
+    anomalous_fields = diags.get("typography_layer", {}).get("anomalous_fields", [])
+    if anomalous_fields:
+        lines.append("CAMPOS SEÑALADOS POR TIPOGRAFÍA:")
+        lines.extend(
+            f"  - '{field.get('text', '')}' — señal dominante: {field.get('dominant_feature')} "
+            f"(z={field.get('max_abs_z')})"
+            for field in anomalous_fields
+        )
+        lines.append("")
+
+    consistency_signals = diags.get("ocr_layer", {}).get("receipt_consistency", {}).get("signals", [])
+    if consistency_signals:
+        lines.append("CONSISTENCIA DEL RECIBO:")
+        lines.extend(f"  - {signal}" for signal in consistency_signals)
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
 def render_analysis_result(index, uploaded_file, data):
     decision = data.get("final_decision", {})
     diags = data.get("diagnostics", {})
@@ -98,6 +164,11 @@ def render_analysis_result(index, uploaded_file, data):
                 st.markdown("**Evidence:**")
                 for item in evidence:
                     st.write(f"- {item}")
+
+        st.markdown("---")
+        st.markdown("#### 📋 Resumen para auditoría")
+        st.caption("Todo lo relevante en un solo bloque — el ícono de copiar está arriba a la derecha.")
+        st.code(build_audit_summary(uploaded_file.name, data), language=None)
 
         st.markdown("---")
         if analysis_route == "receipt_control":
