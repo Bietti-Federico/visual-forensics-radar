@@ -20,7 +20,7 @@ logger = logging.getLogger("DeepFakeAPI")
 RECEIPT_ROUTES = {"receipt", "unknown"}
 IDENTITY_ROUTES = {"dni_front", "dni_back"}
 CARD_ROUTES = {"card"}
-CATEGORY_ONLY_ROUTES = IDENTITY_ROUTES | CARD_ROUTES | {"homebanking"}
+CATEGORY_ONLY_ROUTES = IDENTITY_ROUTES | CARD_ROUTES
 
 # Global model dictionary (Ensures a single instance in VRAM)
 models = {}
@@ -591,8 +591,10 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
     if document_type in CARD_ROUTES and confidence >= 45:
         return build_category_only_response(file_name, type_result, {})
 
-    if document_type in {"homebanking"} and confidence >= 45:
-        return build_category_only_response(file_name, type_result, {})
+    # Homebanking screenshots (transfers, "movimientos") go through full receipt
+    # control instead of being categorized-only — they're just as fraud-prone
+    # (edited amounts/dates) as a photographed receipt, and typography/ELA already
+    # handle homebanking's inverted-contrast highlighted rows.
 
     logger.info("Route selected: receipt control")
 

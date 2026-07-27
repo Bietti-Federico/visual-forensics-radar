@@ -55,6 +55,14 @@ class OCRDetector:
         "detalle",
         "retencion",
         "retención",
+        "movimiento",
+        "transferencia",
+        "alias",
+        "operacion",
+        "operación",
+        "destinatario",
+        "origen",
+        "cvu",
     )
 
     MONTH_NAMES = {
@@ -162,6 +170,15 @@ class OCRDetector:
         "saldo",
         "importe",
         "monto",
+        "movimiento",
+        "transferencia",
+        "alias",
+        "operacion",
+        "operación",
+        "destinatario",
+        "origen",
+        "cvu",
+        "cbu",
     )
 
     def _preprocess(self, image: Image.Image) -> tuple[Image.Image, float]:
