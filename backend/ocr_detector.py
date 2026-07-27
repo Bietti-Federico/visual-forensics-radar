@@ -571,7 +571,13 @@ class OCRDetector:
 
             start = match.end()
             window = text_blob[start:start + 120]
-            amount_match = re.search(r"\(?\$?\s*([0-9][0-9\.,\s]{0,30}[0-9](?:[\.,][0-9]{1,2})?|[0-9]+(?:[\.,][0-9]{1,2})?)\)?", window)
+            # Every real amount on these receipts is formatted with a mandatory 2-digit
+            # decimal (",XX") — requiring it here rejects a bare stray digit ("3") or a
+            # comma-stripped OCR misread ("53558199" instead of "535581,99") that would
+            # otherwise silently corrupt the arithmetic consistency check with a bogus
+            # number. Thousands "." separators are optional since OCR often drops them
+            # while keeping the decimal comma intact.
+            amount_match = re.search(r"\(?\$?\s*([0-9]{1,3}(?:\.?[0-9]{3})*,[0-9]{2})\)?", window)
             if amount_match:
                 raw_amount = amount_match.group(0)
                 parsed = self.parse_amount(raw_amount)
@@ -625,6 +631,16 @@ class OCRDetector:
             nonlocal score
             if expected is None or observed is None:
                 return
+
+            # An order-of-magnitude gap almost always means one side lost a decimal
+            # separator during OCR extraction, not a genuine arithmetic inconsistency —
+            # asserting "inconsistente" here would report an OCR bug as if it were
+            # evidence of fraud. Defense-in-depth alongside the stricter amount regex.
+            larger, smaller = max(abs(expected), abs(observed)), min(abs(expected), abs(observed))
+            if smaller > 0 and larger / smaller > 10:
+                signals.append(f"{label}: no se pudo comparar de forma confiable (posible error de lectura de OCR).")
+                return
+
             tolerance = max(min_tolerance, abs(expected) * tolerance_ratio)
             delta = abs(expected - observed)
             fields.setdefault("differences", {})[label] = {
