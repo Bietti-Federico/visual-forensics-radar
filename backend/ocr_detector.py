@@ -395,7 +395,11 @@ class OCRDetector:
                 "richness_score": richness_score,
                 "text_excerpt": text_blob[:800],
                 "text_blob": text_blob,
-                "candidate_regions": candidate_regions[:40],
+                # No practical cap on real documents (a receipt rarely has more than a
+                # few dozen candidate fields) — this is only a sanity ceiling against a
+                # pathologically noisy OCR read, so a genuine key field is never silently
+                # excluded just because it ranked below some arbitrary cutoff.
+                "candidate_regions": candidate_regions[:200],
                 "suspicious_signals": signals,
                 "ocr_score": min(score, 4),
                 "ocr_quality_score": min(richness_score, 4),

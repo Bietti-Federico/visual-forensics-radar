@@ -218,6 +218,15 @@ def render_analysis_result(index, uploaded_file, data):
                 st.write(f"**Mean confidence:** {ocr_data.get('mean_confidence', 0):.1f}%")
                 st.write(f"**Word count:** {ocr_data.get('word_count', 0)}")
                 st.write(f"**Numeric tokens:** {ocr_data.get('numeric_token_count', 0)}")
+
+                with st.expander("Texto crudo extraído por OCR (para depurar campos faltantes)"):
+                    st.caption(
+                        "Si un campo no aparece en ELA local ni en tipografía, primero revisá acá si "
+                        "el OCR lo leyó bien — si no está o está garbled, el problema es de lectura, "
+                        "no de calibración de umbrales."
+                    )
+                    st.code(ocr_data.get("text_blob", "") or "(sin texto)", language=None)
+
                 if ocr_data.get("keyword_hits"):
                     st.write(f"**Keywords:** {', '.join(ocr_data.get('keyword_hits', []))}")
 

@@ -637,10 +637,10 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
     image_height = metadata_res.get("height", 0)
 
     # ELA local is cheap (crop + JPEG resave, no disk I/O since the image is already
-    # shared in memory), so we can afford to look at more than a handful of fields —
-    # widening this reduces the chance that the actually-tampered field simply didn't
-    # rank in the old top-12 and never got analyzed at all.
-    for candidate in candidate_regions[:20]:
+    # shared in memory) — analyze every candidate field the OCR pass found instead of
+    # an arbitrary top-N, so a genuinely tampered field never gets silently excluded
+    # just because it ranked below some cutoff.
+    for candidate in candidate_regions:
         bbox = candidate.get("bbox")
         if not bbox:
             continue
