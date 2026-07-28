@@ -426,9 +426,6 @@ class OCRDetector:
                     if mean_confidence < 45:
                         score += 1
                         signals.append(f"Confianza OCR baja para un documento ({mean_confidence:.1f}%).")
-                    if numeric_tokens >= 5:
-                        score += 1
-                        signals.append("OCR detectó suficiente estructura numérica para validar el documento.")
                 else:
                     if mean_confidence < 35:
                         score += 1

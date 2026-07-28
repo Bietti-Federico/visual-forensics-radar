@@ -349,21 +349,32 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     return max(key_hits, key=lambda field: field.get("max_abs_z", 0))
 
 
-CROSS_FAMILY_FLOOR = 55.0
+# Logical inconsistency (period/arithmetic) plus a TYPOGRAPHY-only anomaly, with no
+# ELA signal at all — the weakest of the standalone combinations, since typography
+# alone is already the noisiest of the visual signals (see STRONG_TYPOGRAPHY_FLOOR).
+CROSS_FAMILY_FLOOR = 40.0
 CROSS_FAMILY_CONSISTENCY_THRESHOLD = 2
+
+# ELA is a raw pixel-level measurement, not an OCR-derived heuristic — when a key field
+# has an actual local ELA anomaly AND some other independent inconsistency shows up
+# anywhere else in the document (logical, typography, or an unreadably-fonted field),
+# that combination is strong, specific evidence that something was edited, even if the
+# two signals don't point at the exact same field (which would instead hit the higher
+# ELA+typography same-field corroboration floor below).
+ELA_PLUS_OTHER_FLOOR = 65.0
 
 # A key field's label reads fine but its value doesn't, while the REST of the document
 # reads with good confidence — the field's own unreadability isn't explained by general
 # photo/OCR quality, which is a real tell of a deliberately substituted font (exactly
-# what a hand-edited value might look like) rather than an OCR miss. Weighted between
-# the standalone-typography floor and the cross-family floor: it's a single-signal
-# standalone tell, but a more specific/surprising one than a generic OCR read failure.
+# what a hand-edited value might look like) rather than an OCR miss.
 LOCALIZED_FONT_FAILURE_FLOOR = 50.0
 
 
-def _has_visual_key_field_anomaly(local_ela_results: list[dict], typography_result: dict) -> bool:
-    if any(region.get("is_key_field") and region.get("anomaly_detected") for region in local_ela_results):
-        return True
+def _has_ela_key_anomaly(local_ela_results: list[dict]) -> bool:
+    return any(region.get("is_key_field") and region.get("anomaly_detected") for region in local_ela_results)
+
+
+def _has_typography_key_anomaly(typography_result: dict) -> bool:
     return any(field.get("is_key_field") for field in typography_result.get("anomalous_fields", []))
 
 
@@ -411,14 +422,21 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
     if strong_typography_field is not None:
         final_score = max(final_score, STRONG_TYPOGRAPHY_FLOOR)
 
-    cross_family_signal = (
-        receipt_consistency_score >= CROSS_FAMILY_CONSISTENCY_THRESHOLD
-        and _has_visual_key_field_anomaly(local_ela_results, typography_result)
-    )
+    logical_inconsistency = receipt_consistency_score >= CROSS_FAMILY_CONSISTENCY_THRESHOLD
+    ela_key_anomaly = _has_ela_key_anomaly(local_ela_results)
+    typography_key_anomaly = _has_typography_key_anomaly(typography_result)
+    localized_unreadable_fields = receipt_consistency.get("localized_unreadable_fields", [])
+
+    cross_family_signal = logical_inconsistency and typography_key_anomaly and not ela_key_anomaly
     if cross_family_signal:
         final_score = max(final_score, CROSS_FAMILY_FLOOR)
 
-    localized_unreadable_fields = receipt_consistency.get("localized_unreadable_fields", [])
+    ela_plus_other_signal = ela_key_anomaly and (
+        logical_inconsistency or typography_key_anomaly or bool(localized_unreadable_fields)
+    )
+    if ela_plus_other_signal:
+        final_score = max(final_score, ELA_PLUS_OTHER_FLOOR)
+
     if localized_unreadable_fields:
         final_score = max(final_score, LOCALIZED_FONT_FAILURE_FLOOR)
 
@@ -460,11 +478,20 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         )
         decision["evidence"].append(strong_typography_message)
 
+    ela_plus_other_message = None
+    if ela_plus_other_signal:
+        ela_plus_other_message = (
+            "Anomalía de ELA local en un campo clave coincide con otra inconsistencia del documento "
+            "(lógica, tipográfica, o una fuente que no se puede leer): la medición de píxeles, que no depende "
+            "del OCR, corrobora una señal independiente — fuerte indicio de que algo fue modificado."
+        )
+        decision["evidence"].append(ela_plus_other_message)
+
     cross_family_message = None
     if cross_family_signal:
         cross_family_message = (
-            "Inconsistencia lógica (período o aritmética) coincide con una anomalía visual en un campo clave: "
-            "dos familias de señal independientes (lógica y visual) apuntan al mismo documento."
+            "Inconsistencia lógica (período o aritmética) coincide con una anomalía de tipografía en un campo "
+            "clave (sin corroboración de ELA)."
         )
         decision["evidence"].append(cross_family_message)
 
@@ -526,14 +553,19 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         if signal not in decision["evidence"]:
             decision["evidence"].append(signal)
 
+    # Ordered by floor magnitude (strongest, most-corroborated evidence first), not by
+    # insertion order — whichever mechanism actually justifies the highest score is
+    # what the reviewer should see as the reason.
     if corroboration_message is not None:
         decision["primary_reason"] = corroboration_message
+    elif ela_plus_other_message is not None:
+        decision["primary_reason"] = ela_plus_other_message
+    elif localized_font_failure_message is not None:
+        decision["primary_reason"] = localized_font_failure_message
     elif strong_typography_message is not None:
         decision["primary_reason"] = strong_typography_message
     elif cross_family_message is not None:
         decision["primary_reason"] = cross_family_message
-    elif localized_font_failure_message is not None:
-        decision["primary_reason"] = localized_font_failure_message
     else:
         contributions = {name: weight * value for name, (weight, value) in weighted_components.items()}
         winning_component = max(contributions, key=contributions.get)
