@@ -1,10 +1,57 @@
 import os
 import logging
 import tempfile
+
+import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger=logging.getLogger("ElaDetector")
+
+
+def _ink_mask(pixels: np.ndarray) -> np.ndarray | None:
+    """
+    Lightweight, polarity-invariant Otsu ink mask (same approach as
+    typography_detector.py) — picks out just the text/ink pixels within a crop,
+    regardless of whether the field is dark-on-light or light-on-dark (a highlighted
+    "Total" row with a colored fill and white text). Returns None if the crop has no
+    reliable bimodal split to threshold on (e.g. a near-blank cell).
+    """
+    histogram, _ = np.histogram(pixels, bins=256, range=(0, 256))
+    total = int(pixels.size)
+    sum_total = float(np.dot(np.arange(256), histogram))
+
+    sum_background = 0.0
+    weight_background = 0
+    best_threshold = 128.0
+    best_variance = -1.0
+
+    for threshold in range(256):
+        weight_background += int(histogram[threshold])
+        if weight_background == 0:
+            continue
+        weight_foreground = total - weight_background
+        if weight_foreground == 0:
+            break
+
+        sum_background += threshold * histogram[threshold]
+        mean_background = sum_background / weight_background
+        mean_foreground = (sum_total - sum_background) / weight_foreground
+
+        variance = weight_background * weight_foreground * (mean_background - mean_foreground) ** 2
+        if variance > best_variance:
+            best_variance = variance
+            best_threshold = float(threshold)
+
+    max_possible_variance = (total ** 2) * (255.0 ** 2) / 4.0
+    separability = best_variance / max_possible_variance if max_possible_variance > 0 and best_variance > 0 else 0.0
+    if separability < 0.03:
+        return None
+
+    below = pixels < best_threshold
+    below_ratio = float(below.mean())
+    return below if below_ratio <= 0.5 else ~below
+
 
 class ElaDetector:
 
@@ -20,20 +67,37 @@ class ElaDetector:
         self.anomaly_threshold = anomaly_threshold
         logger.info(f"ELADetector initialized. Target Compression Quality: {self.quality}%, Threshold: {self.anomaly_threshold}")
 
-    def _analyze_image(self, original_img: Image.Image, output_path: str | None = "ela_heatmap.jpg", anomaly_threshold: int | None = None) -> dict:
+    def _analyze_image(
+        self,
+        original_img: Image.Image,
+        output_path: str | None = "ela_heatmap.jpg",
+        anomaly_threshold: int | None = None,
+        mask_to_ink: bool = False,
+    ) -> dict:
         """
-        Analyze an in-memory image and optionally saves a heatmap.
+        Analyze an in-memory image and optionally saves a heatmap. When `mask_to_ink`
+        is set, `max_difference` is measured only over the crop's own text/ink pixels
+        instead of the whole crop — a highlighted field (a bold "Total" row with a
+        colored fill) has a large uniform background block whose edges recompress with
+        extra error on their own, unrelated to whether the text inside was edited;
+        masking to just the ink sidesteps that instead of losing the field entirely.
         """
         temp_filename = None
 
         try:
-            original_img = original_img.convert("RGB")
+            # Luminance only for the actual diff math — JPEG subsamples its color
+            # (Cb/Cr) channels at lower resolution than luminance, so any color edge
+            # (a logo, a colored header, a highlighted row) recompresses with extra
+            # error that has nothing to do with tampering. Working in "L" bypasses
+            # chroma subsampling entirely instead of picking it up as false signal.
+            # This only affects ELA's own math, not the image callers pass in/reuse.
+            original_img = original_img.convert("L")
 
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
                 temp_filename = tmp_file.name
 
             original_img.save(temp_filename, "JPEG", quality=self.quality)
-            compressed_img = Image.open(temp_filename).convert("RGB")
+            compressed_img = Image.open(temp_filename).convert("L")
 
             # Calculate the mathematical difference between the two images (A - B)
             ela_image = ImageChops.difference(original_img, compressed_img)
@@ -41,8 +105,19 @@ class ElaDetector:
             # Enhance brightness to make the pixel differences visible to the human eye
             # Find the maximum pixel difference to adjust the black/white balance scale
 
-            extrema = ela_image.getextrema()
-            max_diff = max([ex[1] for ex in extrema])
+            ink_mask = None
+            if mask_to_ink:
+                ink_mask = _ink_mask(np.asarray(original_img, dtype=np.float64))
+
+            if ink_mask is not None and ink_mask.any():
+                diff_array = np.asarray(ela_image, dtype=np.float64)
+                max_diff = int(diff_array[ink_mask].max())
+            else:
+                extrema = ela_image.getextrema()
+                # "L" mode images give a single (min, max) tuple; RGB gives one per
+                # channel. Handled generically in case a caller ever passes a non-"L"
+                # image through.
+                max_diff = max(channel[1] for channel in extrema) if isinstance(extrema[0], tuple) else extrema[1]
 
             if max_diff == 0:
                 max_diff = 1 # Prevent division by zero error on completely flat images
@@ -70,8 +145,8 @@ class ElaDetector:
                 "ela_heatmap_path":output_path,
                 "max_difference":max_diff,
                 "anomaly_detected": is_anomaly,
-                "threshold_used": threshold
-
+                "threshold_used": threshold,
+                "ink_masked": ink_mask is not None and ink_mask.any(),
 
             }
         
@@ -113,15 +188,23 @@ class ElaDetector:
             logger.error(f"Error during ELA analysis: {str(e)}")
             return {"status":"error", "message":str(e)}
 
-    def analyze_crop(self, image_source: str | Image.Image, crop_box: tuple[int, int, int, int], anomaly_threshold: int | None = None) -> dict:
+    def analyze_crop(
+        self,
+        image_source: str | Image.Image,
+        crop_box: tuple[int, int, int, int],
+        anomaly_threshold: int | None = None,
+        mask_to_ink: bool = False,
+    ) -> dict:
         """
-        Analyze a cropped region without generating a heatmap file.
+        Analyze a cropped region without generating a heatmap file. `mask_to_ink=True`
+        restricts the measurement to the crop's own text/ink pixels — use it for a
+        field with a highlighted/colored background instead of skipping it outright.
         """
         try:
             image = self._load(image_source)
             padded_box = crop_box
             crop = image.crop(padded_box)
-            result = self._analyze_image(crop, output_path=None, anomaly_threshold=anomaly_threshold)
+            result = self._analyze_image(crop, output_path=None, anomaly_threshold=anomaly_threshold, mask_to_ink=mask_to_ink)
             result["crop_box"] = padded_box
             return result
         except Exception as e:

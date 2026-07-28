@@ -64,8 +64,6 @@ class TypographyDetector:
     MIN_SEPARABILITY = 0.03
     MIN_COMPONENT_PIXELS = 5
     MIN_RELIABLE_SHAPE_SAMPLES = 3
-    MIN_ANOMALIES_FOR_FRACTION_CHECK = 3
-    MAX_ANOMALY_FRACTION = 0.2
 
     # A photographed paper document has more baseline typography variance than a flat
     # digital scan/screenshot — paper curvature, shadows, a slight off-axis angle all
@@ -371,30 +369,21 @@ class TypographyDetector:
                 entry["typography_anomaly"] = max_abs_z > z_threshold
                 entry["bucket"] = bucket_name
 
+            # NOTE: an earlier version blanket-discarded every anomaly in a bucket
+            # whenever more than ~20% of it got flagged at once, on the theory that a
+            # real edit affects one field, not a third of the document. In practice
+            # that ended up discarding genuine detections alongside noise whenever
+            # several fields happened to cross the threshold together, with no way to
+            # tell which ones were real — removed. The upstream fixes it was meant to
+            # compensate for (reference-code contamination in the dates bucket,
+            # malformed/merged tokens, tiny unreliable samples for slant/aspect) are
+            # now handled at the source instead of via a blanket after-the-fact veto.
             bucket_anomalies = [entry for entry in entries if entry["typography_anomaly"]]
-
-            if (
-                len(bucket_anomalies) >= self.MIN_ANOMALIES_FOR_FRACTION_CHECK
-                and len(bucket_anomalies) / len(entries) > self.MAX_ANOMALY_FRACTION
-            ):
-                # A real edit affects one field, not a third of the document. This many
-                # fields flagged at once (often clustered at near-identical z-scores,
-                # e.g. from perspective distortion across a wide photographed table)
-                # means the population itself isn't homogeneous for this document —
-                # none of them can be trusted as a genuine outlier.
-                for entry in bucket_anomalies:
-                    entry["typography_anomaly"] = False
-                bucket_summaries[bucket_name] = {
-                    "status": "unreliable_population",
-                    "sample_count": len(entries),
-                    "suppressed_anomalies": len(bucket_anomalies),
-                }
-            else:
-                anomalous_fields.extend(bucket_anomalies)
-                bucket_summaries[bucket_name] = {
-                    "status": "success",
-                    "sample_count": len(entries),
-                }
+            anomalous_fields.extend(bucket_anomalies)
+            bucket_summaries[bucket_name] = {
+                "status": "success",
+                "sample_count": len(entries),
+            }
 
         anomalous_fields.sort(key=lambda entry: entry["max_abs_z"], reverse=True)
 

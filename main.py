@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from PIL import Image
+from PIL import Image, ImageStat
 
 from backend.ela_detector import ElaDetector
 from backend.clip_detector import ClipAuthenticator
@@ -166,14 +166,29 @@ def _apply_relative_ela_calibration(local_ela_results: list[dict]) -> None:
     together no longer trips a false alarm, since none of them stand out from their peers.
     With too few fields to trust a relative baseline, the absolute-threshold judgment
     from ElaDetector is left untouched.
+
+    Fields with a highlighted/colored background (`background_highlighted`, e.g. a bold
+    "Total" row with a navy fill and white text) are excluded from the RELATIVE
+    population — they were measured with a different method (ink-masked diff, see
+    `ela_detector.py`) precisely because a plain white-paper baseline doesn't apply to
+    them, so comparing them against (or letting them skew the baseline for) ordinary
+    fields would be comparing apples to oranges. Their `anomaly_detected` from
+    ElaDetector's own absolute-threshold judgment (already computed on the ink-masked
+    diff) is trusted as-is instead of being forced to False — these are often exactly
+    the fields that get edited, so excluding them outright would throw away real signal.
     """
-    if len(local_ela_results) < MIN_LOCAL_ELA_SAMPLES:
-        for region in local_ela_results:
+    reliable_regions = [region for region in local_ela_results if not region.get("background_highlighted")]
+    for region in local_ela_results:
+        if region.get("background_highlighted"):
+            region["relative_z_score"] = None
+
+    if len(reliable_regions) < MIN_LOCAL_ELA_SAMPLES:
+        for region in reliable_regions:
             region["relative_z_score"] = None
         return
 
-    diffs = [region.get("max_difference", 0) for region in local_ela_results]
-    for idx, region in enumerate(local_ela_results):
+    diffs = [region.get("max_difference", 0) for region in reliable_regions]
+    for idx, region in enumerate(reliable_regions):
         z = _leave_one_out_z_score(diffs, idx)
         region["relative_z_score"] = round(z, 2)
         if region.get("anomaly_detected") and z <= RELATIVE_ELA_Z_THRESHOLD:
@@ -226,6 +241,32 @@ def _pad_bbox(bbox: tuple[int, int, int, int], image_width: int, image_height: i
         min(image_width, x2 + padding),
         min(image_height, y2 + padding),
     )
+
+
+BACKGROUND_HIGHLIGHT_MAX_MEDIAN = 150.0
+
+
+def _is_highlighted_background(image: Image.Image, bbox: tuple[int, int, int, int]) -> bool:
+    """
+    Samples a field's own crop to see if it sits on a colored/dark highlighted
+    background (e.g. a bold "Total"/"Subtotal" row with a navy fill and white text)
+    rather than plain paper. The median pixel value is dominated by the background
+    (text/ink is normally the minority of pixels in a tight field crop), so a low
+    median means a dark/colored fill, not white paper. Such a field is structurally
+    higher-contrast by design, not by editing, and shouldn't be judged against a
+    baseline built from ordinary white-background fields.
+    """
+    try:
+        x1, y1, x2, y2 = bbox
+        if x2 <= x1 or y2 <= y1:
+            return False
+        crop = image.crop((x1, y1, x2, y2)).convert("L")
+        if crop.width == 0 or crop.height == 0:
+            return False
+        median = ImageStat.Stat(crop).median[0]
+        return median < BACKGROUND_HIGHLIGHT_MAX_MEDIAN
+    except Exception:
+        return False
 
 
 TYPOGRAPHY_FEATURE_LABELS = {
@@ -288,7 +329,12 @@ def _find_corroborated_field(local_ela_results: list[dict], typography_result: d
 STRONG_TYPOGRAPHY_Z_THRESHOLD = 10.0
 STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES = 8
 STRONG_TYPOGRAPHY_MIN_FEATURES_AGREEING = 2
-STRONG_TYPOGRAPHY_FLOOR = 45.0
+# Lowered below CROSS_FAMILY_FLOOR — now the weakest standalone tier. Real documents
+# legitimately vary letter size/weight (a bold total, a smaller footnote) without any
+# editing involved, so typography alone — even at a high z-score with multiple
+# features agreeing — is held to less weight than any combination involving ELA
+# (a raw pixel measurement) or a logical inconsistency.
+STRONG_TYPOGRAPHY_FLOOR = 35.0
 # Mirrors TypographyDetector.PHOTO_Z_THRESHOLD_MULTIPLIER — a photographed paper
 # document has more baseline typography variance (paper curvature, shadows, angle)
 # than a flat digital scan/screenshot, so this escalation's own threshold relaxes
@@ -363,6 +409,17 @@ CROSS_FAMILY_CONSISTENCY_THRESHOLD = 2
 # ELA+typography same-field corroboration floor below).
 ELA_PLUS_OTHER_FLOOR = 65.0
 
+# ELA is a raw pixel-level measurement, unlike typography/OCR-derived signals — 2+ key
+# fields independently anomalous via ELA ALONE (no typography or logical corroboration
+# needed) is meaningful on its own: it's unlikely that unrelated fields would all cross
+# the document-relative anomaly threshold together by chance or a shared benign artifact
+# (a single shared artifact, like a fold, is already filtered out by the relative
+# calibration itself). Below ELA_PLUS_OTHER_FLOOR since there's no second signal FAMILY
+# corroborating it, but above every OCR-derived standalone tier since ELA doesn't depend
+# on how well Tesseract read the page.
+STRONG_ELA_ALONE_FLOOR = 58.0
+STRONG_ELA_MIN_KEY_ANOMALIES = 2
+
 # A key field's label reads fine but its value doesn't, while the REST of the document
 # reads with good confidence — the field's own unreadability isn't explained by general
 # photo/OCR quality, which is a real tell of a deliberately substituted font (exactly
@@ -372,6 +429,13 @@ LOCALIZED_FONT_FAILURE_FLOOR = 50.0
 
 def _has_ela_key_anomaly(local_ela_results: list[dict]) -> bool:
     return any(region.get("is_key_field") and region.get("anomaly_detected") for region in local_ela_results)
+
+
+def _has_strong_ela_alone_signal(local_ela_results: list[dict]) -> bool:
+    key_anomaly_count = sum(
+        1 for region in local_ela_results if region.get("is_key_field") and region.get("anomaly_detected")
+    )
+    return key_anomaly_count >= STRONG_ELA_MIN_KEY_ANOMALIES
 
 
 def _has_typography_key_anomaly(typography_result: dict) -> bool:
@@ -403,13 +467,18 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
     local_ela_norm = _score_local_ela(local_ela_results)
     typography_norm = _score_typography(typography_result)
 
+    # `metadata` (EXIF presence, editing-software tag, DPI, file size) is deliberately
+    # NOT weighted into the score: "no EXIF" fires on nearly every image shared via
+    # WhatsApp/messaging apps (they strip it before sending) regardless of whether the
+    # document is genuine, so it doesn't discriminate fraud from a normal photo — it's
+    # still computed and shown in diagnostics for transparency, just with zero weight.
     weighted_components = {
-        "local_ela": (0.57, local_ela_norm),
+        "local_ela": (0.59, local_ela_norm),
         "typography": (0.10, typography_norm),
         "receipt_consistency": (0.20, receipt_consistency_norm),
         "ocr": (0.08, ocr_norm),
         "global_ela": (0.03, global_ela_score),
-        "metadata": (0.02, metadata_norm),
+        "metadata": (0.0, metadata_norm),
     }
 
     final_score = _clamp(sum(weight * value for weight, value in weighted_components.values()))
@@ -436,6 +505,10 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
     )
     if ela_plus_other_signal:
         final_score = max(final_score, ELA_PLUS_OTHER_FLOOR)
+
+    strong_ela_alone_signal = _has_strong_ela_alone_signal(local_ela_results)
+    if strong_ela_alone_signal:
+        final_score = max(final_score, STRONG_ELA_ALONE_FLOOR)
 
     if localized_unreadable_fields:
         final_score = max(final_score, LOCALIZED_FONT_FAILURE_FLOOR)
@@ -486,6 +559,14 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             "del OCR, corrobora una señal independiente — fuerte indicio de que algo fue modificado."
         )
         decision["evidence"].append(ela_plus_other_message)
+
+    strong_ela_alone_message = None
+    if strong_ela_alone_signal:
+        strong_ela_alone_message = (
+            "Múltiples campos clave con anomalía de ELA local, sin necesitar otra corroboración: la medición de "
+            "píxeles por sí sola, en más de un campo, ya es un indicio fuerte de edición."
+        )
+        decision["evidence"].append(strong_ela_alone_message)
 
     cross_family_message = None
     if cross_family_signal:
@@ -560,12 +641,14 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         decision["primary_reason"] = corroboration_message
     elif ela_plus_other_message is not None:
         decision["primary_reason"] = ela_plus_other_message
+    elif strong_ela_alone_message is not None:
+        decision["primary_reason"] = strong_ela_alone_message
     elif localized_font_failure_message is not None:
         decision["primary_reason"] = localized_font_failure_message
-    elif strong_typography_message is not None:
-        decision["primary_reason"] = strong_typography_message
     elif cross_family_message is not None:
         decision["primary_reason"] = cross_family_message
+    elif strong_typography_message is not None:
+        decision["primary_reason"] = strong_typography_message
     else:
         contributions = {name: weight * value for name, (weight, value) in weighted_components.items()}
         winning_component = max(contributions, key=contributions.get)
@@ -719,7 +802,14 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
         # noise that a stricter threshold on key fields was producing false positives;
         # 20 applies uniformly regardless of field type.
         local_threshold = 20
-        local_ela = models["ela"].analyze_crop(shared_image, padded_bbox, anomaly_threshold=local_threshold)
+        background_highlighted = _is_highlighted_background(shared_image, tuple(bbox))
+        # A highlighted/colored field (e.g. a bold "Total" row) is often exactly the
+        # kind of field that gets edited — excluding it entirely would throw away
+        # real signal. Masking the diff to just the ink pixels sidesteps the colored
+        # background block's own recompression noise instead of losing the field.
+        local_ela = models["ela"].analyze_crop(
+            shared_image, padded_bbox, anomaly_threshold=local_threshold, mask_to_ink=background_highlighted
+        )
         local_ela["text"] = candidate.get("text", "")
         local_ela["region_type"] = candidate.get("type", "unknown")
         local_ela["is_key_field"] = bool(candidate.get("is_key_field", False))
@@ -729,6 +819,7 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
         # itself already returns — used to match this field against typography's
         # anomalies by position rather than by text.
         local_ela["bbox"] = bbox
+        local_ela["background_highlighted"] = background_highlighted
         local_ela_regions.append(local_ela)
 
     _apply_relative_ela_calibration(local_ela_regions)

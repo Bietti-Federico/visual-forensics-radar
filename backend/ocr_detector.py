@@ -306,6 +306,7 @@ class OCRDetector:
             confidence_values = []
             token_entries = []
             line_text_map = {}
+            line_bbox_map: dict[tuple, list[int]] = {}
 
             for token in combined_tokens:
                 raw_text = token["text"]
@@ -317,6 +318,16 @@ class OCRDetector:
                 confidence_values.append(confidence)
 
                 line_text_map.setdefault(line_id, []).append(raw_text)
+
+                x1, y1, x2, y2 = bbox
+                if line_id not in line_bbox_map:
+                    line_bbox_map[line_id] = [x1, y1, x2, y2]
+                else:
+                    box = line_bbox_map[line_id]
+                    box[0] = min(box[0], x1)
+                    box[1] = min(box[1], y1)
+                    box[2] = max(box[2], x2)
+                    box[3] = max(box[3], y2)
 
                 normalized = raw_text.lower()
                 if any(keyword in normalized for keyword in self.CRITICAL_KEYWORDS):
@@ -410,7 +421,9 @@ class OCRDetector:
             bank_name = self.extract_bank_name(text_blob_upper)
             card_numbers = self.extract_card_numbers(text_blob)
             masked_card_numbers = self.extract_masked_card_numbers(text_blob)
-            receipt_consistency = self.analyze_receipt_consistency(text_blob, mean_confidence)
+            receipt_consistency = self.analyze_receipt_consistency(
+                text_blob, mean_confidence, image=image, line_text_map=line_text_map, line_bbox_map=line_bbox_map
+            )
 
             score = 0
             signals = []
@@ -583,12 +596,75 @@ class OCRDetector:
 
         return None, None, keyword_found
 
+    RETRY_UPSCALE_FACTOR = 3
+    RETRY_TRAILING_WIDTH_RATIO = 0.15
+
+    def _retry_read_line_amount(
+        self, image: Image.Image, keyword_patterns: list[str], line_text_map: dict, line_bbox_map: dict
+    ) -> tuple[float | None, str | None]:
+        """
+        Second attempt at reading a value whose label was found but whose amount
+        wasn't: crops just that label's own line at full original resolution (not the
+        possibly-downscaled copy Tesseract's main pass ran on), upscales it 3x, boosts
+        contrast/sharpness, and re-reads it in isolation with `--psm 7` (tuned for a
+        single line) instead of the whole-page `--psm 6`/`--psm 11` passes. A field
+        that failed once amid ~100+ other words on the full page has a real shot at
+        being read correctly in isolation, at higher effective resolution.
+        """
+        for line_id, tokens in line_text_map.items():
+            line_text = " ".join(tokens)
+            if not any(re.search(pattern, line_text, re.IGNORECASE) for pattern in keyword_patterns):
+                continue
+
+            bbox = line_bbox_map.get(line_id)
+            if not bbox:
+                continue
+
+            x1, y1, x2, y2 = bbox
+            # Extend rightward past the last detected token — the value itself may have
+            # produced no token at all, so the line's own bbox wouldn't include it.
+            x2 = min(image.width, x2 + int(image.width * self.RETRY_TRAILING_WIDTH_RATIO))
+            x1, y1 = max(0, x1 - 4), max(0, y1 - 4)
+            y2 = min(image.height, y2 + 4)
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            crop = image.crop((x1, y1, x2, y2)).convert("L")
+            crop = crop.resize(
+                (crop.width * self.RETRY_UPSCALE_FACTOR, crop.height * self.RETRY_UPSCALE_FACTOR),
+                Image.LANCZOS,
+            )
+            crop = ImageOps.autocontrast(crop)
+            crop = crop.filter(ImageFilter.SHARPEN)
+
+            try:
+                retry_text = pytesseract.image_to_string(crop, config="--oem 1 --psm 7", lang="spa+eng")
+            except Exception as e:
+                logger.error(f"Error during retry OCR read: {str(e)}")
+                continue
+
+            amount_match = re.search(r"\(?\$?\s*([0-9]{1,3}(?:\.?[0-9]{3})*,[0-9]{2})\)?", retry_text)
+            if amount_match:
+                raw_amount = amount_match.group(0)
+                parsed = self.parse_amount(raw_amount)
+                if parsed is not None:
+                    return parsed, raw_amount.strip()
+
+        return None, None
+
     # Above this document-wide mean OCR confidence, a single field still failing to
     # extract is surprising enough to treat as "something specific about this field",
     # not "this photo is generally hard to read".
     LOCALIZED_FAILURE_MIN_CONFIDENCE = 65.0
 
-    def analyze_receipt_consistency(self, text_blob: str, mean_confidence: float = 0.0) -> dict:
+    def analyze_receipt_consistency(
+        self,
+        text_blob: str,
+        mean_confidence: float = 0.0,
+        image: Image.Image | None = None,
+        line_text_map: dict | None = None,
+        line_bbox_map: dict | None = None,
+    ) -> dict:
         text_lower = text_blob.lower()
         if not any(hint in text_lower for hint in self.RECEIPT_LABEL_HINTS):
             return {
@@ -607,6 +683,12 @@ class OCRDetector:
 
         for field_name, patterns in self.RECEIPT_VALUE_PATTERNS.items():
             value, raw_value, keyword_found = self.extract_amount_after_keywords(text_blob, patterns)
+
+            if value is None and keyword_found and image is not None and line_text_map and line_bbox_map:
+                retry_value, retry_raw = self._retry_read_line_amount(image, patterns, line_text_map, line_bbox_map)
+                if retry_value is not None:
+                    value, raw_value = retry_value, f"{retry_raw} (recuperado en 2do intento de lectura)"
+
             if value is not None:
                 fields[field_name] = {"value": value, "raw": raw_value}
             elif keyword_found:
