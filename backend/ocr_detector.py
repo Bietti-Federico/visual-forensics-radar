@@ -1,9 +1,9 @@
 import logging
-import os
 import re
 from dataclasses import dataclass
 
-import pytesseract
+import easyocr
+import numpy as np
 from PIL import Image, ImageOps, ImageFilter
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -21,7 +21,19 @@ class OCRDetector:
     """
     Lightweight OCR stage tuned for document triage.
     Extracts words, candidate numeric regions and a compact structural summary.
+    Backed by EasyOCR (neural detector+recognizer) instead of Tesseract — it handles
+    real-world photo conditions (colored/highlighted backgrounds, non-standard fonts,
+    perspective/fold noise) noticeably better than Tesseract's classical pipeline,
+    which was missing values often enough in practice to be worth the switch.
     """
+
+    def __init__(self):
+        # Loaded ONCE and reused across requests, same pattern as every other model in
+        # this project (see lifespan() in main.py). gpu=False since this deployment has
+        # no GPU available.
+        logger.info("Loading EasyOCR reader (es+en)...")
+        self.reader = easyocr.Reader(["es", "en"], gpu=False)
+        logger.info("EasyOCR reader ready.")
 
     CRITICAL_KEYWORDS = (
         "total",
@@ -191,113 +203,102 @@ class OCRDetector:
 
     def _preprocess(self, image: Image.Image) -> tuple[Image.Image, float]:
         """
-        Returns the preprocessed image plus the inverse scale factor needed to map
-        coordinates from the preprocessed (possibly downscaled) image back to the
-        original image's coordinate space.
+        Returns the downscaled image plus the inverse scale factor needed to map
+        coordinates from the downscaled image back to the original image's
+        coordinate space. Unlike Tesseract, EasyOCR expects something close to the
+        natural image (its own pipeline already normalizes contrast/binarization),
+        so this only downscales for speed on very large images — no grayscale,
+        autocontrast or sharpening.
         """
-        image = image.convert("L")
-        max_width = 1600
+        image = image.convert("RGB")
+        max_width = 2000
         inverse_scale = 1.0
         if image.width > max_width:
             ratio = max_width / image.width
             inverse_scale = image.width / max_width
             image = image.resize((max_width, int(image.height * ratio)))
-        image = ImageOps.autocontrast(image)
-        image = image.filter(ImageFilter.SHARPEN)
         return image, inverse_scale
 
-    def _extract_tokens_from_data(self, data: dict, inverse_scale: float, pass_name: str) -> list[dict]:
-        tokens = []
-        total_items = len(data.get("text", []))
-        for idx in range(total_items):
-            raw_text = str(data["text"][idx]).strip()
-            conf_raw = str(data.get("conf", ["-1"])[idx]).strip()
-            try:
-                confidence = float(conf_raw)
-            except Exception:
-                confidence = -1.0
-
-            if not raw_text or confidence < 0:
-                continue
-
-            x = int(data["left"][idx])
-            y = int(data["top"][idx])
-            w = int(data["width"][idx])
-            h = int(data["height"][idx])
-            # bbox is rescaled back to the original image's coordinate space,
-            # since Tesseract ran on a possibly downscaled copy.
-            bbox = (
-                int(x * inverse_scale),
-                int(y * inverse_scale),
-                int((x + w) * inverse_scale),
-                int((y + h) * inverse_scale),
-            )
-
-            block_num = int(data.get("block_num", [0])[idx])
-            par_num = int(data.get("par_num", [0])[idx])
-            line_num = int(data.get("line_num", [0])[idx])
-
-            tokens.append({
-                "text": raw_text,
-                "confidence": confidence,
-                "bbox": bbox,
-                "line_id": (pass_name, block_num, par_num, line_num),
-            })
-
-        return tokens
-
-    def _bbox_overlap_ratio(self, bbox_a: tuple, bbox_b: tuple) -> float:
-        ax1, ay1, ax2, ay2 = bbox_a
-        bx1, by1, bx2, by2 = bbox_b
-        inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
-        inter_h = max(0, min(ay2, by2) - max(ay1, by1))
-        inter_area = inter_w * inter_h
-        if inter_area == 0:
-            return 0.0
-        area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
-        return inter_area / area_a
-
-    def _merge_ocr_passes(self, primary_tokens: list[dict], secondary_tokens: list[dict]) -> list[dict]:
+    def _cluster_into_lines(self, tokens: list[dict]) -> list[tuple]:
         """
-        PSM 6 (the primary pass) assumes a single uniform block of text, which can make
-        Tesseract drop text sitting inside a bordered/boxed cell entirely — seen in
-        practice as a boxed total silently missing while everything around it read
-        fine. PSM 11 ("sparse text, no particular order") has no such layout
-        assumption, so it runs as a second, purely ADDITIVE pass: anything it finds
-        that the primary pass already covers (by bbox overlap) is discarded, so this
-        can only add tokens the primary pass missed, never duplicate or replace one.
+        EasyOCR gives no block/par/line numbers the way Tesseract does, so lines are
+        reconstructed geometrically: sort tokens by vertical center, then group
+        consecutive tokens whose vertical center falls within a tolerance (a
+        fraction of token height) of the running line's center. Returns a line_id
+        (an opaque tuple, same role as Tesseract's (block, par, line) tuple) per
+        token, in the same order as the input list.
         """
-        merged = list(primary_tokens)
-        for token in secondary_tokens:
-            overlaps_existing = any(
-                self._bbox_overlap_ratio(token["bbox"], existing["bbox"]) > 0.3
-                for existing in primary_tokens
-            )
-            if not overlaps_existing:
-                merged.append(token)
-        return merged
+        indexed = sorted(range(len(tokens)), key=lambda i: (tokens[i]["bbox"][1] + tokens[i]["bbox"][3]) / 2)
+
+        line_ids: list[tuple] = [None] * len(tokens)
+        current_line = 0
+        current_center = None
+        current_height = None
+
+        for i in indexed:
+            x1, y1, x2, y2 = tokens[i]["bbox"]
+            center_y = (y1 + y2) / 2
+            height = max(1, y2 - y1)
+
+            if current_center is None:
+                current_center = center_y
+                current_height = height
+            else:
+                tolerance = 0.6 * max(current_height, height)
+                if abs(center_y - current_center) > tolerance:
+                    current_line += 1
+                    current_center = center_y
+                    current_height = height
+                else:
+                    # Running average keeps the line's reference center stable as
+                    # more tokens are added to it.
+                    current_center = (current_center + center_y) / 2
+                    current_height = (current_height + height) / 2
+
+            line_ids[i] = ("line", current_line)
+
+        return line_ids
 
     def analyze(self, image_path: str) -> dict:
         try:
             image = Image.open(image_path)
             processed, inverse_scale = self._preprocess(image)
 
-            primary_data = pytesseract.image_to_data(
-                processed,
-                output_type=pytesseract.Output.DICT,
-                config="--oem 1 --psm 6",
-                lang="spa+eng",
-            )
-            secondary_data = pytesseract.image_to_data(
-                processed,
-                output_type=pytesseract.Output.DICT,
-                config="--oem 1 --psm 11",
-                lang="spa+eng",
-            )
+            raw_results = self.reader.readtext(np.array(processed), detail=1, paragraph=False)
 
-            primary_tokens = self._extract_tokens_from_data(primary_data, inverse_scale, "primary")
-            secondary_tokens = self._extract_tokens_from_data(secondary_data, inverse_scale, "secondary")
-            combined_tokens = self._merge_ocr_passes(primary_tokens, secondary_tokens)
+            combined_tokens = []
+            for polygon, raw_text, confidence in raw_results:
+                raw_text = str(raw_text).strip()
+                if not raw_text:
+                    continue
+                xs = [point[0] for point in polygon]
+                ys = [point[1] for point in polygon]
+                bbox = (
+                    int(min(xs) * inverse_scale),
+                    int(min(ys) * inverse_scale),
+                    int(max(xs) * inverse_scale),
+                    int(max(ys) * inverse_scale),
+                )
+                combined_tokens.append({
+                    "text": raw_text,
+                    "confidence": float(confidence) * 100.0,
+                    "bbox": bbox,
+                })
+
+            line_ids = self._cluster_into_lines(combined_tokens)
+            for token, line_id in zip(combined_tokens, line_ids):
+                token["line_id"] = line_id
+
+            # Unlike Tesseract's image_to_data (which returns tokens in guaranteed
+            # block/par/line/word reading order), EasyOCR's readtext() returns
+            # detections in whatever order its detector found them — not necessarily
+            # top-to-bottom/left-to-right. Every proximity-based heuristic downstream
+            # (HEADER_ROW_CONTEXT_PATTERN's "concepto" lookback, extract_amount_after_
+            # keywords' forward window) assumes a label's neighboring text sits near it
+            # in the flattened text_blob, so tokens must be restored to reading order —
+            # by line (already clustered above), then left-to-right within each line —
+            # before text_blob/line_text_map are built.
+            combined_tokens.sort(key=lambda t: (t["line_id"][1], t["bbox"][0]))
 
             words: list[OcrWord] = []
             candidate_regions = []
@@ -563,53 +564,79 @@ class OCRDetector:
         except Exception:
             return None
 
+    # Some ANSES-style receipts are laid out as a table with column headers
+    # ("Concepto | Haberes | Deducciones") instead of "Etiqueta: $Valor" lines — a bare
+    # "HABERES" match right after "CONCEPTO" is that column header, not a labeled total,
+    # and there's genuinely no adjacent amount to read (not a font/OCR problem at all).
+    # Likewise, "RECIBO DE HABERES" is the canonical title of an Argentine payroll
+    # receipt — a bare "HABERES" match inside that title is the document's own name,
+    # not a labeled total either, and has no amount anywhere near it.
+    HEADER_ROW_CONTEXT_PATTERN = re.compile(r"concepto|recibo\s+de", re.IGNORECASE)
+
     def extract_amount_after_keywords(self, text_blob: str, keyword_patterns: list[str]) -> tuple[float | None, str | None, bool]:
         """
         Returns (value, raw_text, keyword_found). `keyword_found` is True whenever the
-        label itself (e.g. "NETO") was located in the text, even if no valid amount
-        could be read nearby — distinguishing "this document doesn't have this field"
-        from "the label is there but its value is unreadable", which callers should
-        treat as a red flag in its own right (e.g. an unusual/edited font that OCR
-        can't parse), not silence.
+        label itself (e.g. "NETO") was located in the text as a genuine value label
+        (not a table column header — see HEADER_ROW_CONTEXT_PATTERN), even if no valid
+        amount could be read nearby — distinguishing "this document doesn't have this
+        field" from "the label is there but its value is unreadable", which callers
+        should treat as a red flag in its own right (e.g. an unusual/edited font that
+        OCR can't parse), not silence.
         """
         keyword_found = False
         for keyword_pattern in keyword_patterns:
-            match = re.search(keyword_pattern, text_blob, re.IGNORECASE)
-            if not match:
-                continue
-            keyword_found = True
+            for match in re.finditer(keyword_pattern, text_blob, re.IGNORECASE):
+                context_before = text_blob[max(0, match.start() - 20):match.start()]
+                if self.HEADER_ROW_CONTEXT_PATTERN.search(context_before):
+                    continue
 
-            start = match.end()
-            window = text_blob[start:start + 120]
-            # Every real amount on these receipts is formatted with a mandatory 2-digit
-            # decimal (",XX") — requiring it here rejects a bare stray digit ("3") or a
-            # comma-stripped OCR misread ("53558199" instead of "535581,99") that would
-            # otherwise silently corrupt the arithmetic consistency check with a bogus
-            # number. Thousands "." separators are optional since OCR often drops them
-            # while keeping the decimal comma intact.
-            amount_match = re.search(r"\(?\$?\s*([0-9]{1,3}(?:\.?[0-9]{3})*,[0-9]{2})\)?", window)
-            if amount_match:
-                raw_amount = amount_match.group(0)
-                parsed = self.parse_amount(raw_amount)
-                if parsed is not None:
-                    return parsed, raw_amount.strip(), True
+                keyword_found = True
+
+                start = match.end()
+                window = text_blob[start:start + 120]
+                # Every real amount on these receipts is formatted with a mandatory
+                # 2-digit decimal (",XX") — requiring it here rejects a bare stray digit
+                # ("3") or a comma-stripped OCR misread ("53558199" instead of
+                # "535581,99") that would otherwise silently corrupt the arithmetic
+                # consistency check with a bogus number. Thousands "." separators are
+                # optional since OCR often drops them while keeping the decimal comma.
+                amount_match = re.search(r"\(?\$?\s*([0-9]{1,3}(?:\.?[0-9]{3})*,[0-9]{2})\)?", window)
+                if amount_match:
+                    raw_amount = amount_match.group(0)
+                    parsed = self.parse_amount(raw_amount)
+                    if parsed is not None:
+                        return parsed, raw_amount.strip(), True
 
         return None, None, keyword_found
 
-    RETRY_UPSCALE_FACTOR = 3
     RETRY_TRAILING_WIDTH_RATIO = 0.15
+
+    # Each variant tried in order: (upscale_factor, use_binarization). Different
+    # scale/binarization assumptions recover different failure modes — a value that
+    # fails ALL of them is a stronger "genuinely unreadable" tell than one that only
+    # got a single, fixed attempt. (PSM variation doesn't apply to EasyOCR.)
+    RETRY_VARIANTS = (
+        (3, False),  # moderate zoom, contrast-only (original attempt)
+        (5, True),  # more aggressive zoom + hard black/white binarization
+    )
+
+    def _binarize(self, crop: Image.Image) -> Image.Image:
+        threshold = float(np.asarray(crop, dtype=np.float64).mean())
+        return crop.point(lambda pixel: 255 if pixel > threshold else 0)
 
     def _retry_read_line_amount(
         self, image: Image.Image, keyword_patterns: list[str], line_text_map: dict, line_bbox_map: dict
-    ) -> tuple[float | None, str | None]:
+    ) -> tuple[float | None, str | None, int]:
         """
-        Second attempt at reading a value whose label was found but whose amount
+        Second attempt(s) at reading a value whose label was found but whose amount
         wasn't: crops just that label's own line at full original resolution (not the
-        possibly-downscaled copy Tesseract's main pass ran on), upscales it 3x, boosts
-        contrast/sharpness, and re-reads it in isolation with `--psm 7` (tuned for a
-        single line) instead of the whole-page `--psm 6`/`--psm 11` passes. A field
-        that failed once amid ~100+ other words on the full page has a real shot at
-        being read correctly in isolation, at higher effective resolution.
+        possibly-downscaled copy the main OCR pass ran on) and re-reads it in
+        isolation, tried across a few different zoom/binarization/segmentation
+        variants — a field that failed once amid ~100+ other words on the full page
+        has a real shot at being read correctly in isolation, at higher effective
+        resolution, and different variants recover different failure modes.
+        Returns (value, raw_text, attempts_tried) — `attempts_tried` lets the caller
+        report how many variants were exhausted when all of them still failed.
         """
         for line_id, tokens in line_text_map.items():
             line_text = " ".join(tokens)
@@ -629,28 +656,35 @@ class OCRDetector:
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            crop = image.crop((x1, y1, x2, y2)).convert("L")
-            crop = crop.resize(
-                (crop.width * self.RETRY_UPSCALE_FACTOR, crop.height * self.RETRY_UPSCALE_FACTOR),
-                Image.LANCZOS,
-            )
-            crop = ImageOps.autocontrast(crop)
-            crop = crop.filter(ImageFilter.SHARPEN)
+            base_crop = image.crop((x1, y1, x2, y2)).convert("L")
+            attempts_tried = 0
 
-            try:
-                retry_text = pytesseract.image_to_string(crop, config="--oem 1 --psm 7", lang="spa+eng")
-            except Exception as e:
-                logger.error(f"Error during retry OCR read: {str(e)}")
-                continue
+            for scale, use_binarization in self.RETRY_VARIANTS:
+                attempts_tried += 1
+                crop = base_crop.resize((base_crop.width * scale, base_crop.height * scale), Image.LANCZOS)
+                crop = ImageOps.autocontrast(crop)
+                if use_binarization:
+                    crop = self._binarize(crop)
+                else:
+                    crop = crop.filter(ImageFilter.SHARPEN)
 
-            amount_match = re.search(r"\(?\$?\s*([0-9]{1,3}(?:\.?[0-9]{3})*,[0-9]{2})\)?", retry_text)
-            if amount_match:
-                raw_amount = amount_match.group(0)
-                parsed = self.parse_amount(raw_amount)
-                if parsed is not None:
-                    return parsed, raw_amount.strip()
+                try:
+                    retry_lines = self.reader.readtext(np.array(crop.convert("RGB")), detail=0, paragraph=True)
+                    retry_text = " ".join(retry_lines)
+                except Exception as e:
+                    logger.error(f"Error during retry OCR read (variant {attempts_tried}): {str(e)}")
+                    continue
 
-        return None, None
+                amount_match = re.search(r"\(?\$?\s*([0-9]{1,3}(?:\.?[0-9]{3})*,[0-9]{2})\)?", retry_text)
+                if amount_match:
+                    raw_amount = amount_match.group(0)
+                    parsed = self.parse_amount(raw_amount)
+                    if parsed is not None:
+                        return parsed, raw_amount.strip(), attempts_tried
+
+            return None, None, attempts_tried
+
+        return None, None, 0
 
     # Above this document-wide mean OCR confidence, a single field still failing to
     # extract is surprising enough to treat as "something specific about this field",
@@ -684,8 +718,11 @@ class OCRDetector:
         for field_name, patterns in self.RECEIPT_VALUE_PATTERNS.items():
             value, raw_value, keyword_found = self.extract_amount_after_keywords(text_blob, patterns)
 
+            retry_attempts_tried = 0
             if value is None and keyword_found and image is not None and line_text_map and line_bbox_map:
-                retry_value, retry_raw = self._retry_read_line_amount(image, patterns, line_text_map, line_bbox_map)
+                retry_value, retry_raw, retry_attempts_tried = self._retry_read_line_amount(
+                    image, patterns, line_text_map, line_bbox_map
+                )
                 if retry_value is not None:
                     value, raw_value = retry_value, f"{retry_raw} (recuperado en 2do intento de lectura)"
 
@@ -693,6 +730,15 @@ class OCRDetector:
                 fields[field_name] = {"value": value, "raw": raw_value}
             elif keyword_found:
                 display_name = self.FIELD_DISPLAY_NAMES.get(field_name, field_name)
+                # Surviving every re-read variant (different zoom, binarization, and
+                # segmentation mode) unreadable is a stronger tell than a single failed
+                # attempt would be — worth saying explicitly for the human reviewer.
+                retry_note = (
+                    f" Se probaron {retry_attempts_tried} variantes de relectura (zoom, binarización, "
+                    "segmentación) y ninguna lo recuperó."
+                    if retry_attempts_tried
+                    else ""
+                )
                 if mean_confidence >= self.LOCALIZED_FAILURE_MIN_CONFIDENCE:
                     # The rest of the document reads fine, so THIS field's failure isn't
                     # explained by general photo/OCR quality — a strong tell that it uses
@@ -705,7 +751,7 @@ class OCRDetector:
                     signals.append(
                         f"Se encontró la etiqueta '{display_name}' pero no se pudo leer su monto, pese a que el "
                         f"resto del documento se lee con buena confianza ({mean_confidence:.1f}%) — posible fuente "
-                        "sustituida deliberadamente, revisar manualmente."
+                        f"sustituida deliberadamente, revisar manualmente.{retry_note}"
                     )
                 else:
                     # The label itself was found, but no valid amount could be read near
@@ -715,7 +761,8 @@ class OCRDetector:
                     # just with less weight than the localized case above.
                     score += 1
                     signals.append(
-                        f"Se encontró la etiqueta '{display_name}' pero no se pudo leer su monto — revisar manualmente."
+                        f"Se encontró la etiqueta '{display_name}' pero no se pudo leer su monto — "
+                        f"revisar manualmente.{retry_note}"
                     )
 
         haberes = fields.get("total_haberes", {}).get("value")

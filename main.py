@@ -6,9 +6,10 @@ from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from PIL import Image, ImageStat
+import numpy as np
+from PIL import Image
 
-from backend.ela_detector import ElaDetector
+from backend.ela_detector import ElaDetector, _ink_mask
 from backend.clip_detector import ClipAuthenticator
 from backend.metadata_detector import MetadataDetector
 from backend.ocr_detector import OCRDetector
@@ -243,28 +244,49 @@ def _pad_bbox(bbox: tuple[int, int, int, int], image_width: int, image_height: i
     )
 
 
-BACKGROUND_HIGHLIGHT_MAX_MEDIAN = 150.0
+BACKGROUND_HIGHLIGHT_MAX_MEAN = 150.0
 
 
 def _is_highlighted_background(image: Image.Image, bbox: tuple[int, int, int, int]) -> bool:
     """
     Samples a field's own crop to see if it sits on a colored/dark highlighted
     background (e.g. a bold "Total"/"Subtotal" row with a navy fill and white text)
-    rather than plain paper. The median pixel value is dominated by the background
-    (text/ink is normally the minority of pixels in a tight field crop), so a low
-    median means a dark/colored fill, not white paper. Such a field is structurally
-    higher-contrast by design, not by editing, and shouldn't be judged against a
-    baseline built from ordinary white-background fields.
+    rather than plain paper.
+
+    Uses the same polarity-invariant Otsu split as the ink-masked ELA measurement
+    (`ela_detector._ink_mask`) to find which side of the crop is the MINORITY (ink)
+    vs the MAJORITY (background), instead of assuming ink is always the minority — a
+    bold/large character, or a tightly-cropped single logo letter (e.g. an "ANSES"
+    logo glyph), can make the ink itself the majority of the crop. A raw "median
+    pixel value" check gets fooled by that into calling ordinary bold black-on-white
+    text a "highlighted" field; splitting into ink vs. background first and checking
+    only the background side's brightness does not.
     """
     try:
         x1, y1, x2, y2 = bbox
+        padding = 3
+        x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
+        x2, y2 = min(image.width, x2 + padding), min(image.height, y2 + padding)
         if x2 <= x1 or y2 <= y1:
             return False
+
         crop = image.crop((x1, y1, x2, y2)).convert("L")
-        if crop.width == 0 or crop.height == 0:
+        pixels = np.asarray(crop, dtype=np.float64)
+        if pixels.size == 0:
             return False
-        median = ImageStat.Stat(crop).median[0]
-        return median < BACKGROUND_HIGHLIGHT_MAX_MEDIAN
+
+        ink_mask = _ink_mask(pixels)
+        if ink_mask is None:
+            # No reliable bimodal split (near-blank crop, low contrast) — can't tell,
+            # default to "ordinary field" rather than risk a false highlight call.
+            return False
+
+        background_mask = ~ink_mask
+        if not background_mask.any():
+            return False
+
+        background_mean = float(pixels[background_mask].mean())
+        return background_mean < BACKGROUND_HIGHLIGHT_MAX_MEAN
     except Exception:
         return False
 
@@ -416,7 +438,7 @@ ELA_PLUS_OTHER_FLOOR = 65.0
 # (a single shared artifact, like a fold, is already filtered out by the relative
 # calibration itself). Below ELA_PLUS_OTHER_FLOOR since there's no second signal FAMILY
 # corroborating it, but above every OCR-derived standalone tier since ELA doesn't depend
-# on how well Tesseract read the page.
+# on how well OCR read the page.
 STRONG_ELA_ALONE_FLOOR = 58.0
 STRONG_ELA_MIN_KEY_ANOMALIES = 2
 

@@ -21,14 +21,16 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    tesseract-ocr-spa \
     && rm -rf /var/lib/apt/lists/*
 
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download and cache EasyOCR's detection/recognition model weights at build time
+# (network access is available here) so the container never needs internet access or
+# a slow first-request download at runtime.
+RUN python -c "import easyocr; easyocr.Reader(['es', 'en'])"
 
 COPY backend ./backend
 COPY frontend ./frontend
