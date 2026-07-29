@@ -481,11 +481,18 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         "metadata": (0.0, metadata_norm),
     }
 
-    final_score = _clamp(sum(weight * value for weight, value in weighted_components.values()))
+    # Exact points each weighted component contributed to the BASE score, kept around
+    # so evidence lines tied to a component (below) can report their real contribution
+    # instead of just a threshold-crossing message with no number attached.
+    component_points = {name: round(weight * value, 2) for name, (weight, value) in weighted_components.items()}
+    weighted_base_score = _clamp(sum(component_points.values()))
+    final_score = weighted_base_score
+
+    CORROBORATION_FLOOR = 75.0
 
     corroborated_field = _find_corroborated_field(local_ela_results, typography_result)
     if corroborated_field is not None:
-        final_score = max(final_score, 75.0)
+        final_score = max(final_score, CORROBORATION_FLOOR)
 
     strong_typography_field = _strongest_typography_key_field(typography_result)
     if strong_typography_field is not None:
@@ -515,6 +522,19 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
 
     band_key, band_label = _normalize_band(final_score)
 
+    def _floor_aporte(floor_value: float) -> str:
+        # Floors are a max(), not a sum — a floor only actually moved the needle if
+        # the final score equals it exactly; otherwise the base (or a higher floor)
+        # already accounted for the score, and this signal is still worth flagging as
+        # present, just not what determined the number.
+        if abs(final_score - floor_value) < 1e-6:
+            return f"piso aplicado: {floor_value:.0f} (score ponderado base era {weighted_base_score:.1f})"
+        return f"piso de {floor_value:.0f} no fue el determinante (score final ya es {final_score:.1f})"
+
+    def _component_aporte(component: str) -> str:
+        weight, value = weighted_components[component]
+        return f"incluido en componente '{component}': {component_points[component]:+.1f} pts ({weight * 100:.0f}% × {value:.1f})"
+
     decision = {
         "score": round(final_score, 2),
         "risk_band": band_key,
@@ -535,13 +555,21 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
         "typography": typography_result,
     }
 
+    evidence_texts_seen = set()
+
+    def add_evidence(text: str, aporte: str) -> None:
+        if text in evidence_texts_seen:
+            return
+        evidence_texts_seen.add(text)
+        decision["evidence"].append({"text": text, "aporte": aporte})
+
     corroboration_message = None
     if corroborated_field is not None:
         corroboration_message = (
             f"Posible edición confirmada en campo clave: '{corroborated_field['text']}' "
             "(ELA local + tipografía coinciden)."
         )
-        decision["evidence"].append(corroboration_message)
+        add_evidence(corroboration_message, _floor_aporte(CORROBORATION_FLOOR))
 
     strong_typography_message = None
     if strong_typography_field is not None:
@@ -549,7 +577,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             f"Tipografía marcadamente distinta en campo clave: {_describe_typography_field(strong_typography_field)}. "
             "Patrón típico de sustitución de fuente/caligrafía sin rastro de compresión JPEG que ELA pueda corroborar."
         )
-        decision["evidence"].append(strong_typography_message)
+        add_evidence(strong_typography_message, _floor_aporte(STRONG_TYPOGRAPHY_FLOOR))
 
     ela_plus_other_message = None
     if ela_plus_other_signal:
@@ -558,7 +586,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             "(lógica, tipográfica, o una fuente que no se puede leer): la medición de píxeles, que no depende "
             "del OCR, corrobora una señal independiente — fuerte indicio de que algo fue modificado."
         )
-        decision["evidence"].append(ela_plus_other_message)
+        add_evidence(ela_plus_other_message, _floor_aporte(ELA_PLUS_OTHER_FLOOR))
 
     strong_ela_alone_message = None
     if strong_ela_alone_signal:
@@ -566,7 +594,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             "Múltiples campos clave con anomalía de ELA local, sin necesitar otra corroboración: la medición de "
             "píxeles por sí sola, en más de un campo, ya es un indicio fuerte de edición."
         )
-        decision["evidence"].append(strong_ela_alone_message)
+        add_evidence(strong_ela_alone_message, _floor_aporte(STRONG_ELA_ALONE_FLOOR))
 
     cross_family_message = None
     if cross_family_signal:
@@ -574,7 +602,7 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             "Inconsistencia lógica (período o aritmética) coincide con una anomalía de tipografía en un campo "
             "clave (sin corroboración de ELA)."
         )
-        decision["evidence"].append(cross_family_message)
+        add_evidence(cross_family_message, _floor_aporte(CROSS_FAMILY_FLOOR))
 
     localized_font_failure_message = None
     if localized_unreadable_fields:
@@ -583,19 +611,19 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             f"No se pudo leer el monto de '{field_labels}' pese a que el resto del documento se lee con buena "
             "confianza — posible fuente sustituida deliberadamente, no una falla genérica de OCR."
         )
-        decision["evidence"].append(localized_font_failure_message)
+        add_evidence(localized_font_failure_message, _floor_aporte(LOCALIZED_FONT_FAILURE_FLOOR))
 
     if final_score >= 60:
-        decision["evidence"].append("Revisión prioritaria recomendada.")
+        add_evidence("Revisión prioritaria recomendada.", "informativo (refleja la banda final, no aporta puntos propios)")
     elif final_score >= 25:
-        decision["evidence"].append("Revisión humana sugerida.")
+        add_evidence("Revisión humana sugerida.", "informativo (refleja la banda final, no aporta puntos propios)")
     else:
-        decision["evidence"].append("Sin señales fuertes de fraude.")
+        add_evidence("Sin señales fuertes de fraude.", "informativo (refleja la banda final, no aporta puntos propios)")
 
     if local_ela_norm >= 70:
-        decision["evidence"].append("Anomalía localizada fuerte en texto o números críticos.")
+        add_evidence("Anomalía localizada fuerte en texto o números críticos.", _component_aporte("local_ela"))
     elif local_ela_norm >= 40:
-        decision["evidence"].append("Variación localizada compatible con edición.")
+        add_evidence("Variación localizada compatible con edición.", _component_aporte("local_ela"))
 
     key_region_alerts = 0
     for region in local_ela_results:
@@ -603,36 +631,36 @@ def decision_engine(ela_result: dict, metadata_result: dict, ocr_result: dict, l
             key_region_alerts += 1
 
     if key_region_alerts >= 2:
-        decision["evidence"].append("Múltiples anomalías ELA en campos clave (fechas/montos).")
+        add_evidence("Múltiples anomalías ELA en campos clave (fechas/montos).", _component_aporte("local_ela"))
     elif key_region_alerts == 1:
-        decision["evidence"].append("Anomalía ELA detectada en un campo clave (fecha o monto).")
+        add_evidence("Anomalía ELA detectada en un campo clave (fecha o monto).", _component_aporte("local_ela"))
 
     typography_key_hits = [
         field for field in typography_result.get("anomalous_fields", []) if field.get("is_key_field")
     ]
     if typography_key_hits:
         top_field = typography_key_hits[0]
-        decision["evidence"].append(f"{_describe_typography_field(top_field).capitalize()} en campo clave.")
+        add_evidence(
+            f"{_describe_typography_field(top_field).capitalize()} en campo clave.",
+            _component_aporte("typography"),
+        )
 
     if ocr_mean_conf and ocr_mean_conf < 45:
-        decision["evidence"].append(f"OCR con confianza media baja ({ocr_mean_conf:.1f}%).")
+        add_evidence(f"OCR con confianza media baja ({ocr_mean_conf:.1f}%).", _component_aporte("ocr"))
 
     if receipt_consistency_score >= 3:
-        decision["evidence"].append("Inconsistencia aritmética en montos del recibo.")
+        add_evidence("Inconsistencia aritmética en montos del recibo.", _component_aporte("receipt_consistency"))
     elif receipt_consistency_score >= 1:
-        decision["evidence"].append("Posible inconsistencia leve entre montos del recibo.")
+        add_evidence("Posible inconsistencia leve entre montos del recibo.", _component_aporte("receipt_consistency"))
 
     for signal in metadata_signals[:2]:
-        if signal not in decision["evidence"]:
-            decision["evidence"].append(signal)
+        add_evidence(signal, "informativo (metadata no pesa en el score)")
 
     for signal in ocr_signals[:2]:
-        if signal not in decision["evidence"]:
-            decision["evidence"].append(signal)
+        add_evidence(signal, _component_aporte("ocr"))
 
     for signal in receipt_consistency_signals[:2]:
-        if signal not in decision["evidence"]:
-            decision["evidence"].append(signal)
+        add_evidence(signal, _component_aporte("receipt_consistency"))
 
     # Ordered by floor magnitude (strongest, most-corroborated evidence first), not by
     # insertion order — whichever mechanism actually justifies the highest score is

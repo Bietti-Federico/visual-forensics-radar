@@ -146,7 +146,7 @@ class ElaDetector:
                 "max_difference":max_diff,
                 "anomaly_detected": is_anomaly,
                 "threshold_used": threshold,
-                "ink_masked": ink_mask is not None and ink_mask.any(),
+                "ink_masked": bool(ink_mask is not None and ink_mask.any()),
 
             }
         

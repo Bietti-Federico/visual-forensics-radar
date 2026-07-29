@@ -71,8 +71,13 @@ def build_audit_summary(file_name, data):
 
     evidence = decision.get("evidence", [])
     if evidence:
-        lines.append("EVIDENCIA:")
-        lines.extend(f"  - {item}" for item in evidence)
+        lines.append("EVIDENCIA (con aporte al scoring):")
+        for item in evidence:
+            text = item.get("text", "") if isinstance(item, dict) else item
+            aporte = item.get("aporte") if isinstance(item, dict) else None
+            lines.append(f"  - {text}")
+            if aporte:
+                lines.append(f"      ↳ {aporte}")
         lines.append("")
 
     ela_hits = [r for r in diags.get("ocr_local_ela_regions", []) if r.get("anomaly_detected")]
@@ -163,7 +168,13 @@ def render_analysis_result(index, uploaded_file, data):
             if evidence:
                 st.markdown("**Evidence:**")
                 for item in evidence:
-                    st.write(f"- {item}")
+                    text = item.get("text", "") if isinstance(item, dict) else item
+                    aporte = item.get("aporte") if isinstance(item, dict) else None
+                    if aporte:
+                        st.write(f"- {text}")
+                        st.caption(f"  ↳ {aporte}")
+                    else:
+                        st.write(f"- {text}")
 
         st.markdown("---")
         st.markdown("#### 📋 Resumen para auditoría")
