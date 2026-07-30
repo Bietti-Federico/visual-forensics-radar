@@ -117,6 +117,46 @@ class OCRDetector:
     DNI_TRAMITE_PATTERN = re.compile(r"(?:tramite|tr[aá]mite)[^0-9]{0,20}([0-9]{6,14})", re.IGNORECASE)
     DNI_NUMBER_PATTERN = re.compile(r"\b([0-9]{7,8})\b")
     CARD_NUMBER_PATTERN = re.compile(r"(?:\b\d[\d\s\-]{11,22}\d\b|\b\*{2,}\s*\d{4,6}\b)")
+    # A real CUIL/CUIT is always exactly 11 digits (2-8-1), with or without the
+    # separating dashes.
+    CUIL_PATTERN = re.compile(r"\b(\d{2}-?\d{8}-?\d)\b")
+    CUIL_DASHED_PATTERN = re.compile(r"\d{2}-\d{7,8}-\d")
+    PERSON_LABEL_PATTERN = re.compile(r"personal|titular|beneficiario|apellido\s+y\s+nombre", re.IGNORECASE)
+
+    # Structural/identity lines already covered by a dedicated extractor (DNI, CUIL,
+    # período, persona, banco) — excluded from the generic line-item extraction below
+    # so a legajo/DNI/account number never gets miscategorized as a receipt concept.
+    # "concepto" is included because a "Concepto | Haberes | Deducciones" column-header
+    # row is meant to be itemized via each concept's OWN line (already self-sufficient,
+    # label + amount together) — pairing the header itself against the row below would
+    # duplicate/garble the first concept instead of adding anything.
+    LINE_ITEM_EXCLUDE_KEYWORDS = (
+        "legajo", "dni", "cuil", "cuit", "periodo", "período", "nro.rec", "nro rec",
+        "localidad", "destino", "personal", "titular", "beneficiario", "acreditado",
+        "caja de ahorro", "sucursal", "cbu", "cvu", "alias", "concepto",
+        "n° de beneficio", "nro de beneficio", "n de beneficio", "prestacion", "prestación",
+    )
+
+    # A CUIL/CUIT (XX-XXXXXXXX-X) is never itself a monetary amount, even though its
+    # digit-and-dash shape can otherwise look like a plausible trailing "amount" (e.g.
+    # the "-7" tail of "20-44389704-7" would match a negative single-digit amount) —
+    # any line containing one is identity data end to end, handled by extract_cuil.
+    IDENTITY_DASH_PATTERN = re.compile(r"\b\d{1,2}-\d{6,9}-\d\b")
+
+    # An Argentine payroll/government receipt names its issuing organism somewhere in
+    # the header — matched independently of (and in addition to) BANK_KEYWORDS, which
+    # only covers homebanking/bank statements.
+    ISSUER_KEYWORDS = {
+        "anses": "ANSES",
+        "consejo provincial de educacion": "Consejo Provincial de Educación",
+        "consejo provincial de educación": "Consejo Provincial de Educación",
+        "provincia de santa cruz": "Provincia de Santa Cruz",
+        "provincia de buenos aires": "Provincia de Buenos Aires",
+        "municipalidad": "Municipalidad",
+        "ministerio": "Ministerio",
+        "policia": "Policía",
+        "policía": "Policía",
+    }
 
     BANK_KEYWORDS = (
         "BBVA",
@@ -429,6 +469,12 @@ class OCRDetector:
             bank_name = self.extract_bank_name(text_blob_upper)
             card_numbers = self.extract_card_numbers(text_blob)
             masked_card_numbers = self.extract_masked_card_numbers(text_blob)
+            cuil = self.extract_cuil(text_blob, line_text_map, line_bbox_map, line_token_bboxes)
+            persona = self.extract_person_name(line_text_map, line_bbox_map, line_token_bboxes)
+            tipo_recibo = self.classify_receipt_issuer(text_blob_upper, bank_name)
+            period_info = self.analyze_period_consistency(text_blob)
+            periodo = period_info["periods_found"][0]["raw"] if period_info["periods_found"] else None
+            line_items = self.extract_line_items(line_text_map, line_bbox_map, line_token_bboxes)
             receipt_consistency = self.analyze_receipt_consistency(
                 text_blob, mean_confidence, image=image, line_text_map=line_text_map, line_bbox_map=line_bbox_map,
                 line_token_bboxes=line_token_bboxes,
@@ -486,12 +532,17 @@ class OCRDetector:
                 "ocr_score": min(score, 4),
                 "ocr_quality_score": min(richness_score, 4),
                 "receipt_consistency": receipt_consistency,
+                "line_items": line_items,
                 "extracted_fields": {
                     "dni_tramite": dni_tramite,
                     "dni_number": dni_number,
                     "bank_name": bank_name,
                     "card_numbers": card_numbers,
                     "masked_card_numbers": masked_card_numbers,
+                    "cuil": cuil,
+                    "persona": persona,
+                    "tipo_recibo": tipo_recibo,
+                    "periodo": periodo,
                 },
             }
 
@@ -535,6 +586,221 @@ class OCRDetector:
         for match in re.findall(r"\*{2,}\s*\d{3,6}", text_blob):
             masked.append(match.replace(" ", ""))
         return list(dict.fromkeys(masked))
+
+    def _find_labeled_column_value(
+        self,
+        label_pattern: re.Pattern,
+        line_text_map: dict,
+        line_bbox_map: dict,
+        line_token_bboxes: dict,
+        is_valid_value,
+    ) -> str | None:
+        """
+        Looks up a label that may appear either inline on the same line as its value
+        ("CUIL: 20-44389704-7") or as a column header in a 2-line table — e.g. a
+        "Titular" header with the name sitting on the line below, aligned by X
+        position (the same layout extract_line_items' Case B handles for amounts).
+
+        For the column-header case, the label's own column boundaries are taken from
+        its IMMEDIATE neighboring header tokens on the same line (whatever sits to the
+        left of the next column's header start, and to the right of the previous
+        column's header end) — every value-line token whose center falls inside that
+        span is collected, in left-to-right order, so a multi-word value (a full name
+        under a single "Titular" header) isn't truncated to just its nearest token.
+        """
+        ordered_lines = sorted(line_bbox_map.items(), key=lambda item: item[1][1])
+
+        for position, (line_id, _bbox) in enumerate(ordered_lines):
+            tokens = line_text_map.get(line_id, [])
+            bboxes = line_token_bboxes.get(line_id, [])
+            if not tokens or len(tokens) != len(bboxes):
+                continue
+
+            line_text = " ".join(tokens)
+            match = label_pattern.search(line_text)
+            if not match:
+                continue
+
+            # Inline: label and value share the same line.
+            remainder = line_text[match.end():].strip(" :-.")
+            if remainder and is_valid_value(remainder):
+                return remainder
+
+            # Column header: gather value-line tokens whose column falls between this
+            # label's immediate left/right neighbors on the header line.
+            matched_boxes = []
+            cursor = 0
+            for token_text, token_bbox in zip(tokens, bboxes):
+                token_start, token_end = cursor, cursor + len(token_text)
+                if token_start < match.end() and token_end > match.start():
+                    matched_boxes.append(token_bbox)
+                cursor = token_end + 1
+            if not matched_boxes or position + 1 >= len(ordered_lines):
+                continue
+
+            label_x1 = min(box[0] for box in matched_boxes)
+            label_x2 = max(box[2] for box in matched_boxes)
+            left_boundary = max(
+                (box[2] for box in bboxes if box[2] <= label_x1), default=None
+            )
+            right_boundary = min(
+                (box[0] for box in bboxes if box[0] >= label_x2), default=None
+            )
+
+            value_line_id, _ = ordered_lines[position + 1]
+            value_tokens = line_text_map.get(value_line_id, [])
+            value_bboxes = line_token_bboxes.get(value_line_id, [])
+            if not value_tokens or len(value_tokens) != len(value_bboxes):
+                continue
+
+            collected = []
+            for value_text, value_bbox in zip(value_tokens, value_bboxes):
+                center = (value_bbox[0] + value_bbox[2]) / 2
+                if left_boundary is not None and center <= left_boundary:
+                    continue
+                if right_boundary is not None and center >= right_boundary:
+                    continue
+                collected.append((value_bbox[0], value_text))
+
+            if not collected:
+                continue
+            collected.sort(key=lambda item: item[0])
+            column_value = " ".join(text for _, text in collected).strip(" :-.")
+            if column_value and is_valid_value(column_value):
+                return column_value
+
+        return None
+
+    def extract_cuil(
+        self,
+        text_blob: str,
+        line_text_map: dict | None = None,
+        line_bbox_map: dict | None = None,
+        line_token_bboxes: dict | None = None,
+    ) -> str | None:
+        """
+        Prefers the column-aligned value under/after a "CUIL" label (handles both
+        inline "CUIL: X" labels and column-header table layouts) over a bare text-
+        proximity search, which can pick up an unrelated 11-digit-shaped number (a
+        beneficio/legajo number, say) that merely happens to sit near the word "CUIL"
+        in reading order without actually being paired with it.
+
+        Some receipts show a "CUIL" column/label more than once (e.g. one for the
+        titular, one for an unset "persona apoderada" that's blank or "-") — a
+        genuine CUIL is reliably printed with its separating dashes ("20-44389704-7"),
+        while an unrelated same-length reference number usually isn't, so a dashed
+        match is tried across ALL "cuil" occurrences before falling back to accepting
+        a dashless 11-digit match anywhere.
+        """
+        if line_text_map and line_bbox_map and line_token_bboxes:
+            # A CUIL should never contain whitespace, but the column-collector joins
+            # multiple OCR tokens with a space by default (needed for multi-word
+            # values like a name) — if EasyOCR split the number itself mid-token (e.g.
+            # "20-44389704-7" read as two tokens, "20-44389704" and "-7"), that leaves
+            # a stray space that would otherwise make a perfectly good match fail
+            # fullmatch validation.
+            for validator in (
+                lambda v: bool(self.CUIL_DASHED_PATTERN.fullmatch(v.replace(" ", "").strip())),
+                lambda v: bool(self.CUIL_PATTERN.fullmatch(v.replace(" ", "").strip())),
+            ):
+                column_value = self._find_labeled_column_value(
+                    re.compile(r"\bcuil\b", re.IGNORECASE),
+                    line_text_map, line_bbox_map, line_token_bboxes,
+                    is_valid_value=validator,
+                )
+                if column_value:
+                    match = self.CUIL_PATTERN.fullmatch(column_value.replace(" ", "").strip())
+                    if match:
+                        return match.group(1)
+
+        near_cuil_any = None
+        fallback = None
+        for match in self.CUIL_PATTERN.finditer(text_blob):
+            context_before = text_blob[max(0, match.start() - 15):match.start()]
+            near_label = "cuil" in context_before.lower()
+            is_dashed = bool(self.CUIL_DASHED_PATTERN.fullmatch(match.group(1)))
+
+            if near_label and is_dashed:
+                return match.group(1)
+            if near_label and near_cuil_any is None:
+                near_cuil_any = match.group(1)
+            if fallback is None:
+                fallback = match.group(1)
+        return near_cuil_any or fallback
+
+    def extract_person_name(
+        self,
+        line_text_map: dict,
+        line_bbox_map: dict | None = None,
+        line_token_bboxes: dict | None = None,
+    ) -> str | None:
+        """
+        Looks for a "Titular" column/label first (the most specific, reliable anchor
+        for the account/beneficiary holder's name), via column-aware lookup so a
+        multi-word name isn't confused with the next column's header ("CUIL"). Falls
+        back to the older same-line heuristic for templates that inline the name
+        instead of using a column header (e.g. "Personal DNI 25985232 COLMAN ADRIANA
+        ALEJANDRA CUIL 27-25985232-9").
+        """
+        def looks_like_name(value: str) -> bool:
+            if not re.search(r"[A-Za-zÀ-ÿ]{3,}", value) or value.strip().isdigit():
+                return False
+            lowered = value.lower()
+            return not any(kw in lowered for kw in ("cuil", "dni", "titular", "personal", "beneficiario"))
+
+        if line_bbox_map and line_token_bboxes:
+            column_value = self._find_labeled_column_value(
+                re.compile(r"\btitular\b", re.IGNORECASE),
+                line_text_map, line_bbox_map, line_token_bboxes,
+                is_valid_value=looks_like_name,
+            )
+            if column_value:
+                return column_value
+
+        for tokens in line_text_map.values():
+            line_text = " ".join(tokens)
+            label_match = self.PERSON_LABEL_PATTERN.search(line_text)
+            if not label_match:
+                continue
+
+            dni_match = re.search(r"DNI\s*[:\-]?\s*\d{6,9}", line_text, re.IGNORECASE)
+            cuil_match = re.search(r"CUIL", line_text, re.IGNORECASE)
+            if dni_match and cuil_match and cuil_match.start() > dni_match.end():
+                candidate = line_text[dni_match.end():cuil_match.start()].strip(" :-.")
+                if candidate:
+                    return candidate
+
+            remainder = line_text[label_match.end():]
+            name_words = [word for word in remainder.split() if re.fullmatch(r"[A-Za-zÀ-ÿ.]+", word)]
+            if name_words:
+                return " ".join(name_words)
+
+        return None
+
+    # The issuing organism's name is reliably near the document's own header/logo —
+    # checking only a leading window avoids matching an unrelated mention deeper in
+    # the body (e.g. a bank statement whose transaction description happens to
+    # mention "ANSES" as a transfer counterparty, which isn't this document's issuer).
+    ISSUER_HEADER_WINDOW_CHARS = 250
+
+    # A receipt that simply mentions a bank (for deposit/payment info) isn't itself a
+    # homebanking screenshot — these payroll-specific signals mean it's a salary/
+    # pension receipt regardless of which bank it happens to reference.
+    PAYROLL_SIGNAL_KEYWORDS = (
+        "haberes", "descuentos", "legajo", "jubilat", "recibo de sueldo",
+        "recibo de haberes", "aportes personal", "cct ",
+    )
+
+    def classify_receipt_issuer(self, text_blob_upper: str, bank_name: str | None) -> str:
+        header_window = text_blob_upper.lower()[:self.ISSUER_HEADER_WINDOW_CHARS]
+        for keyword, label in self.ISSUER_KEYWORDS.items():
+            if keyword in header_window:
+                return label
+
+        lowered = text_blob_upper.lower()
+        if bank_name and not any(keyword in lowered for keyword in self.PAYROLL_SIGNAL_KEYWORDS):
+            return f"Homebanking / {bank_name}"
+        return "Desconocido"
 
     def parse_amount(self, raw_value: str) -> float | None:
         if not raw_value:
@@ -713,6 +979,219 @@ class OCRDetector:
                 return parsed, best_candidate.strip()
 
         return None, None
+
+    def _split_into_column_groups(
+        self, bboxes: list[tuple[int, int, int, int]], num_groups: int
+    ) -> list[list[int]] | None:
+        """
+        Segments a header line's tokens (by index) into `num_groups` left-to-right
+        column groups by cutting at the largest horizontal gaps between consecutive
+        tokens — a multi-word column header ("R. con Aportes") has small gaps between
+        its own words and a comparatively large gap before the next column's header
+        starts. Returns None if there aren't enough tokens to form that many groups.
+        """
+        if num_groups <= 0 or len(bboxes) < num_groups:
+            return None
+        if num_groups == 1:
+            return [list(range(len(bboxes)))]
+
+        order = sorted(range(len(bboxes)), key=lambda i: bboxes[i][0])
+        gaps = [
+            (bboxes[order[k]][0] - bboxes[order[k - 1]][2], k)
+            for k in range(1, len(order))
+        ]
+        gaps.sort(key=lambda item: item[0], reverse=True)
+        cut_positions = sorted(k for _, k in gaps[: num_groups - 1])
+
+        groups = []
+        start = 0
+        for cut in cut_positions:
+            groups.append([order[i] for i in range(start, cut)])
+            start = cut
+        groups.append([order[i] for i in range(start, len(order))])
+        return groups
+
+    # A trailing numeric token anchored to the END of a line's joined text — tolerant of
+    # EasyOCR occasionally splitting a decimal separator into its own token ("506029 .
+    # 27" reads as three tokens joined with spaces, which this still matches as one
+    # token since it operates on the joined line text, not per-token). The leading
+    # `(?<![0-9])` is load-bearing: without it, this would happily match just the last
+    # 1-3 digits of a much longer, separator-less number (a CUIL/legajo/beneficio
+    # number) and mistake that suffix for a standalone trailing amount. A bare space is
+    # only allowed immediately around a "." or "," separator — NOT between two whole
+    # digit runs with no separator at all — so two unrelated numbers that happen to
+    # land on the same (mis-clustered, densely packed) line never get fused into one
+    # inflated amount (e.g. "19032 34,783.45" must NOT read as "1903234783.45").
+    TRAILING_NUMBER_TOKEN_PATTERN = re.compile(
+        r"(?<![0-9])-?\(?\$?\s*[0-9]+(?:\s?[.,]\s?[0-9]+)*\)?\s*$"
+    )
+    LINE_ITEM_MIN_LABEL_CHARS = 3
+
+    def _is_plausible_amount_token(self, raw: str) -> bool:
+        """
+        The lookbehind above stops TRAILING_NUMBER_TOKEN_PATTERN from slicing a suffix
+        off a longer ID, but a short bare number with no decimal (a stray reference
+        digit, or the whole of a short code) is still not reliably a monetary amount.
+        A genuine decimal fraction (",XX"/".XX") is trusted regardless of length; a
+        bare integer with no decimal shown is only trusted if it's long enough that a
+        real amount is more likely than a stray code (these payroll concepts don't
+        realistically list amounts under 1000 pesos).
+        """
+        stripped = raw.strip()
+        digits_only = re.sub(r"[^0-9]", "", stripped)
+        if not digits_only:
+            return False
+        if re.search(r"[\.,]\s?[0-9]{1,2}\)?\s*$", stripped):
+            return True
+        return len(digits_only) >= 4
+
+    def extract_line_items(
+        self,
+        line_text_map: dict,
+        line_bbox_map: dict,
+        line_token_bboxes: dict,
+    ) -> list[dict]:
+        """
+        Generic concept:amount extraction, independent of the fixed
+        RECEIPT_VALUE_PATTERNS keyword list — captures every line-item concept a
+        receipt lists (e.g. "301 ASIGNACION POR CARGO: 506029.27"), not just the
+        handful of known summary totals extracted by analyze_receipt_consistency.
+
+        Two layouts are handled, mirroring the same two cases as the fixed-field
+        extraction above:
+        - Case A: the concept and its amount sit on the SAME line, amount trailing.
+        - Case B: a header line of 2+ concept labels, immediately followed by a line
+          of 2+ values in the same left-to-right order (see _extract_table_column_value
+          for the single-keyword version of this same 2-line table layout).
+        """
+        ordered_lines = sorted(line_bbox_map.items(), key=lambda item: item[1][1])
+        consumed_value_lines = set()
+        items = []
+
+        for position, (line_id, _bbox) in enumerate(ordered_lines):
+            if line_id in consumed_value_lines:
+                continue
+
+            tokens = line_text_map.get(line_id, [])
+            bboxes = line_token_bboxes.get(line_id, [])
+            if not tokens or len(tokens) != len(bboxes):
+                continue
+
+            line_text = " ".join(tokens)
+            lowered = line_text.lower()
+
+            if self.IDENTITY_DASH_PATTERN.search(line_text):
+                continue
+
+            if any(keyword in lowered for keyword in self.LINE_ITEM_EXCLUDE_KEYWORDS):
+                # This header/label is identity or reference data (DNI, CUIL, período,
+                # legajo, beneficio number...), already covered by a dedicated
+                # extractor. If the line right below has no concept text of its own
+                # (a bare value entirely dependent on THIS label for meaning, e.g. a
+                # lone "06/2026" under a "Período" header), consume it too so it's
+                # never independently re-visited as an orphan Case A candidate with no
+                # real label — but leave it alone if it has its own alphabetic text,
+                # since that means it's a self-sufficient concept+amount row in its
+                # own right (e.g. "HABER MENSUAL $552.322,59" below a "Concepto"
+                # header row).
+                if position + 1 < len(ordered_lines):
+                    next_line_id, _ = ordered_lines[position + 1]
+                    next_text = " ".join(line_text_map.get(next_line_id, []))
+                    if next_text and not any(char.isalpha() for char in next_text):
+                        consumed_value_lines.add(next_line_id)
+                continue
+
+            # Case A: same-line "concepto ... monto".
+            amount_match = self.TRAILING_NUMBER_TOKEN_PATTERN.search(line_text)
+            # A trailing number directly after a "/" is the year of a DD/MM/YYYY date
+            # ("FECHA PROX. COBRO DESDE: 13/08/2026"), not a monetary amount.
+            is_date_tail = bool(amount_match) and line_text[:amount_match.start()].rstrip().endswith("/")
+            if (
+                amount_match and not is_date_tail
+                and amount_match.group(0).strip()
+                and self._is_plausible_amount_token(amount_match.group(0))
+            ):
+                label_text = line_text[:amount_match.start()].strip(" .:-")
+                parsed = self.parse_amount(amount_match.group(0))
+                if parsed is not None and len(label_text) >= self.LINE_ITEM_MIN_LABEL_CHARS:
+                    # Map the match span back to the token(s) it covers, for a bbox.
+                    matched_boxes = []
+                    cursor = 0
+                    for token_text, token_bbox in zip(tokens, bboxes):
+                        token_start = cursor
+                        token_end = cursor + len(token_text)
+                        if token_start < amount_match.end() and token_end > amount_match.start():
+                            matched_boxes.append(token_bbox)
+                        cursor = token_end + 1
+                    item_bbox = (
+                        min(b[0] for b in matched_boxes), min(b[1] for b in matched_boxes),
+                        max(b[2] for b in matched_boxes), max(b[3] for b in matched_boxes),
+                    ) if matched_boxes else None
+                    items.append({
+                        "concepto": label_text,
+                        "monto": parsed,
+                        "raw": amount_match.group(0).strip(),
+                        "bbox": item_bbox,
+                    })
+                    continue
+
+            # Case B: 2-line table row — this line has no amount of its own; check if
+            # it's a header for a values row immediately below.
+            if not any(char.isalpha() for char in line_text):
+                continue
+            if position + 1 >= len(ordered_lines):
+                continue
+
+            value_line_id, _ = ordered_lines[position + 1]
+            value_tokens = line_text_map.get(value_line_id, [])
+            value_bboxes = line_token_bboxes.get(value_line_id, [])
+            if not value_tokens or len(value_tokens) != len(value_bboxes):
+                continue
+
+            numeric_count = sum(1 for text in value_tokens if self.NUMERIC_PATTERN.search(text))
+            if numeric_count < max(1, len(value_tokens) / 2) or len(value_tokens) < 2:
+                continue
+
+            label_groups = self._split_into_column_groups(bboxes, len(value_tokens))
+            if label_groups is None:
+                continue
+
+            matched_any = False
+            for group in label_groups:
+                group_tokens = [tokens[i] for i in group]
+                group_bboxes = [bboxes[i] for i in group]
+                label_text = " ".join(group_tokens).strip(" .:-")
+                if len(label_text) < self.LINE_ITEM_MIN_LABEL_CHARS:
+                    continue
+
+                group_x1 = min(b[0] for b in group_bboxes)
+                group_x2 = max(b[2] for b in group_bboxes)
+                group_center_x = (group_x1 + group_x2) / 2
+                max_gap = max(group_x2 - group_x1, self.TABLE_COLUMN_MIN_GAP_PX) * self.TABLE_COLUMN_MAX_GAP_RATIO
+
+                best_value, best_bbox, best_distance = None, None, None
+                for value_text, value_bbox in zip(value_tokens, value_bboxes):
+                    value_center_x = (value_bbox[0] + value_bbox[2]) / 2
+                    distance = abs(value_center_x - group_center_x)
+                    if best_distance is None or distance < best_distance:
+                        best_distance, best_value, best_bbox = distance, value_text, value_bbox
+
+                if best_value is None or best_distance > max_gap:
+                    continue
+                parsed = self.parse_amount(best_value)
+                if parsed is not None:
+                    items.append({
+                        "concepto": label_text,
+                        "monto": parsed,
+                        "raw": best_value.strip(),
+                        "bbox": best_bbox,
+                    })
+                    matched_any = True
+
+            if matched_any:
+                consumed_value_lines.add(value_line_id)
+
+        return items
 
     RETRY_TRAILING_WIDTH_RATIO = 0.15
 
