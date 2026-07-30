@@ -259,6 +259,26 @@ def render_analysis_result(index, uploaded_file, data):
                 if ocr_data.get("keyword_hits"):
                     st.write(f"**Keywords:** {', '.join(ocr_data.get('keyword_hits', []))}")
 
+                extracted_fields_ocr = ocr_data.get("extracted_fields", {})
+                if any(extracted_fields_ocr.get(k) for k in ("cuil", "persona", "tipo_recibo", "periodo")):
+                    st.markdown("**Campos extraídos (capa de extracción):**")
+                    st.caption(
+                        "Mismos extractores que la rama de extracción — visibles acá para depurar "
+                        "ambos ciclos (fraude + extracción) sobre el mismo caso."
+                    )
+                    st.write(f"**Tipo de recibo:** {extracted_fields_ocr.get('tipo_recibo') or 'No detectado'}")
+                    st.write(f"**Persona:** {extracted_fields_ocr.get('persona') or 'No detectado'}")
+                    st.write(f"**Período:** {extracted_fields_ocr.get('periodo') or 'No detectado'}")
+                    st.write(f"**CUIL:** {extracted_fields_ocr.get('cuil') or 'No detectado'}")
+
+                line_items = ocr_data.get("line_items", [])
+                if line_items:
+                    st.markdown(f"**Montos por ítem de línea ({len(line_items)}):**")
+                    st.table([
+                        {"Concepto": item.get("concepto", ""), "Monto": item.get("monto"), "Raw": item.get("raw", "")}
+                        for item in line_items
+                    ])
+
                 if receipt_consistency:
                     st.markdown("**Receipt consistency:**")
                     st.write(f"**Detected:** {receipt_consistency.get('detected', False)}")
