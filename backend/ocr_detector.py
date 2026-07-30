@@ -308,6 +308,12 @@ class OCRDetector:
             token_entries = []
             line_text_map = {}
             line_bbox_map: dict[tuple, list[int]] = {}
+            # Parallel to line_text_map (same order/index per line) — line_text_map only
+            # keeps the joined text, which loses each token's own position. Needed to
+            # align a column header against the matching value token on another line
+            # (see _extract_table_column_value), which line_bbox_map's single aggregate
+            # bbox per line can't provide.
+            line_token_bboxes: dict[tuple, list[tuple[int, int, int, int]]] = {}
 
             for token in combined_tokens:
                 raw_text = token["text"]
@@ -319,6 +325,7 @@ class OCRDetector:
                 confidence_values.append(confidence)
 
                 line_text_map.setdefault(line_id, []).append(raw_text)
+                line_token_bboxes.setdefault(line_id, []).append(bbox)
 
                 x1, y1, x2, y2 = bbox
                 if line_id not in line_bbox_map:
@@ -423,7 +430,8 @@ class OCRDetector:
             card_numbers = self.extract_card_numbers(text_blob)
             masked_card_numbers = self.extract_masked_card_numbers(text_blob)
             receipt_consistency = self.analyze_receipt_consistency(
-                text_blob, mean_confidence, image=image, line_text_map=line_text_map, line_bbox_map=line_bbox_map
+                text_blob, mean_confidence, image=image, line_text_map=line_text_map, line_bbox_map=line_bbox_map,
+                line_token_bboxes=line_token_bboxes,
             )
 
             score = 0
@@ -609,6 +617,103 @@ class OCRDetector:
 
         return None, None, keyword_found
 
+    # A column header's value token on the row below rarely lines up pixel-perfect —
+    # print/scan skew, kerning and column padding all shift it a bit — but it should
+    # still land close to the header's own horizontal span. This bounds how far a
+    # "nearest token" match is allowed to be before it's rejected as unrelated.
+    TABLE_COLUMN_MAX_GAP_RATIO = 1.5
+    TABLE_COLUMN_MIN_GAP_PX = 40
+
+    def _extract_table_column_value(
+        self,
+        keyword_patterns: list[str],
+        line_text_map: dict,
+        line_bbox_map: dict,
+        line_token_bboxes: dict,
+    ) -> tuple[float | None, str | None]:
+        """
+        Some receipts summarize totals as a 2-line table: a header row naming each
+        column ("R. con Aportes  R. sin Aportes  T.Sal.Fam  Retenciones  Total Liquido")
+        followed immediately below by one line of values in the same left-to-right
+        column order. `extract_amount_after_keywords` only looks a fixed window AHEAD
+        on the SAME line, so a label whose value sits on the NEXT line (rather than to
+        its right) never finds it — a distinct layout from the single-row
+        "Concepto|Haberes|Deducciones" case HEADER_ROW_CONTEXT_PATTERN already handles.
+
+        Unlike that pattern, a header-row match is exactly the signal this method looks
+        for (not something to exclude) — the label being a column header is the whole
+        point.
+        """
+        ordered_lines = sorted(line_bbox_map.items(), key=lambda item: item[1][1])
+
+        for position, (line_id, _bbox) in enumerate(ordered_lines):
+            tokens = line_text_map.get(line_id, [])
+            token_bboxes = line_token_bboxes.get(line_id, [])
+            if not tokens or len(tokens) != len(token_bboxes):
+                continue
+
+            line_text = " ".join(tokens)
+            match = None
+            for pattern in keyword_patterns:
+                match = re.search(pattern, line_text, re.IGNORECASE)
+                if match:
+                    break
+            if not match:
+                continue
+
+            # Map the match's character span back to the token(s) it covers, by
+            # walking the same join() logic used to build line_text, then union their
+            # bboxes to get the label's own horizontal footprint.
+            matched_boxes = []
+            cursor = 0
+            for token_text, token_bbox in zip(tokens, token_bboxes):
+                token_start = cursor
+                token_end = cursor + len(token_text)
+                if token_start < match.end() and token_end > match.start():
+                    matched_boxes.append(token_bbox)
+                cursor = token_end + 1  # +1 for the joining space
+
+            if not matched_boxes:
+                continue
+
+            label_x1 = min(box[0] for box in matched_boxes)
+            label_x2 = max(box[2] for box in matched_boxes)
+            label_center_x = (label_x1 + label_x2) / 2
+            label_width = label_x2 - label_x1
+
+            if position + 1 >= len(ordered_lines):
+                continue
+            value_line_id, _ = ordered_lines[position + 1]
+            value_tokens = line_text_map.get(value_line_id, [])
+            value_bboxes = line_token_bboxes.get(value_line_id, [])
+            if not value_tokens or len(value_tokens) != len(value_bboxes):
+                continue
+
+            # The line below must actually look like a row of values, not an unrelated
+            # paragraph that merely happens to sit right underneath the header.
+            numeric_count = sum(1 for text in value_tokens if self.NUMERIC_PATTERN.search(text))
+            if numeric_count < max(1, len(value_tokens) / 2):
+                continue
+
+            max_gap = max(label_width, self.TABLE_COLUMN_MIN_GAP_PX) * self.TABLE_COLUMN_MAX_GAP_RATIO
+            best_candidate = None
+            best_distance = None
+            for value_text, value_bbox in zip(value_tokens, value_bboxes):
+                value_center_x = (value_bbox[0] + value_bbox[2]) / 2
+                distance = abs(value_center_x - label_center_x)
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_candidate = value_text
+
+            if best_candidate is None or best_distance > max_gap:
+                continue
+
+            parsed = self.parse_amount(best_candidate)
+            if parsed is not None:
+                return parsed, best_candidate.strip()
+
+        return None, None
+
     RETRY_TRAILING_WIDTH_RATIO = 0.15
 
     # Each variant tried in order: (upscale_factor, use_binarization). Different
@@ -698,6 +803,7 @@ class OCRDetector:
         image: Image.Image | None = None,
         line_text_map: dict | None = None,
         line_bbox_map: dict | None = None,
+        line_token_bboxes: dict | None = None,
     ) -> dict:
         text_lower = text_blob.lower()
         if not any(hint in text_lower for hint in self.RECEIPT_LABEL_HINTS):
@@ -717,6 +823,16 @@ class OCRDetector:
 
         for field_name, patterns in self.RECEIPT_VALUE_PATTERNS.items():
             value, raw_value, keyword_found = self.extract_amount_after_keywords(text_blob, patterns)
+
+            # Purely arithmetic (no OCR call) — tried before the image-based retry
+            # below so a value resolvable from a 2-line summary table skips the cost
+            # of re-running EasyOCR on a crop entirely.
+            if value is None and keyword_found and line_text_map and line_bbox_map and line_token_bboxes:
+                table_value, table_raw = self._extract_table_column_value(
+                    patterns, line_text_map, line_bbox_map, line_token_bboxes
+                )
+                if table_value is not None:
+                    value, raw_value = table_value, f"{table_raw} (recuperado de tabla de 2 líneas)"
 
             retry_attempts_tried = 0
             if value is None and keyword_found and image is not None and line_text_map and line_bbox_map:

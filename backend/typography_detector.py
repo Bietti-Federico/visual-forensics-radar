@@ -59,6 +59,12 @@ class TypographyDetector:
 
     MIN_SAMPLES_PER_BUCKET = {"amounts": 5, "dates": 3}
     Z_SCORE_THRESHOLD = 3.5
+    # A single feature spiking (e.g. only `slant_angle`, which can be thrown off by
+    # ordinary bold weight rather than genuine tilt) is exactly the kind of one-off
+    # noise that's produced false positives on otherwise clean receipts — a genuine
+    # font/handwriting substitution should show up across more than one rendering
+    # dimension (height, ink density, slant, proportions).
+    MIN_FEATURES_AGREEING = 2
     MIN_CROP_SIZE = 6
     CROP_PADDING = 3
     MIN_SEPARABILITY = 0.03
@@ -363,10 +369,12 @@ class TypographyDetector:
                 dominant_feature = max(z_scores, key=z_scores.get)
                 max_abs_z = z_scores[dominant_feature]
 
+                agreeing_features = sum(1 for z in z_scores.values() if z > z_threshold)
+
                 entry["z_scores"] = {name: round(z, 2) for name, z in z_scores.items()}
                 entry["max_abs_z"] = round(max_abs_z, 2)
                 entry["dominant_feature"] = dominant_feature
-                entry["typography_anomaly"] = max_abs_z > z_threshold
+                entry["typography_anomaly"] = agreeing_features >= self.MIN_FEATURES_AGREEING
                 entry["bucket"] = bucket_name
 
             # NOTE: an earlier version blanket-discarded every anomaly in a bucket

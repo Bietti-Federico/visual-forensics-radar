@@ -2,6 +2,7 @@ import os
 import tempfile
 import logging
 import statistics
+import time
 from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -350,7 +351,6 @@ def _find_corroborated_field(local_ela_results: list[dict], typography_result: d
 
 STRONG_TYPOGRAPHY_Z_THRESHOLD = 10.0
 STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES = 8
-STRONG_TYPOGRAPHY_MIN_FEATURES_AGREEING = 2
 # Lowered below CROSS_FAMILY_FLOOR — now the weakest standalone tier. Real documents
 # legitimately vary letter size/weight (a bold total, a smaller footnote) without any
 # editing involved, so typography alone — even at a high z-score with multiple
@@ -364,22 +364,6 @@ STRONG_TYPOGRAPHY_FLOOR = 35.0
 PHOTO_STRONG_TYPOGRAPHY_MULTIPLIER = 1.3
 
 
-def _typography_features_agree(field: dict, base_threshold: float) -> bool:
-    """
-    A single feature spiking (e.g. only `aspect_ratio`, which is still sensitive to
-    OCR punctuation/digit-count quirks even measured per-character) is exactly the
-    kind of one-off noise that's been producing false positives on otherwise clean
-    receipts. A genuine font/handwriting substitution should show up across more than
-    one rendering dimension — height, ink density, slant, proportions — so standalone
-    escalation (without ELA agreement) requires at least 2 of the 4 to independently
-    clear the base anomaly threshold (already photo-adjusted upstream), not just the
-    single dominant one.
-    """
-    z_scores = field.get("z_scores", {})
-    agreeing = sum(1 for z in z_scores.values() if z > base_threshold)
-    return agreeing >= STRONG_TYPOGRAPHY_MIN_FEATURES_AGREEING
-
-
 def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     """
     A fraud pattern based purely on font/handwriting substitution (a receipt reprinted
@@ -389,15 +373,16 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
     own right (without needing ELA agreement) only when ALL of these hold:
     - its z-score is far beyond the base flagging threshold (>=10, roughly triple it;
       relaxed further for a photographed physical document, same as the base check)
-    - at least 2 of its 4 rendering features independently agree it's anomalous
     - its bucket has a decent sample size (small samples are exactly where OCR noise
       and format quirks produce spuriously large single-feature z-scores)
+    (Every entry in `anomalous_fields` already required 2+ of its 4 rendering features
+    to independently agree — see TypographyDetector.MIN_FEATURES_AGREEING — so that
+    check doesn't need to be repeated here.)
     Even so, this is treated as more moderate evidence than ELA+typography
     corroboration — it lands the document in "sospechoso", not "altamente sospechoso"
     outright, since it's still a single method's own internal signal.
     """
     capture_mode = typography_result.get("capture_mode", "digital_or_scan")
-    z_threshold_used = typography_result.get("z_threshold_used", 3.5)
     strong_threshold = (
         STRONG_TYPOGRAPHY_Z_THRESHOLD * PHOTO_STRONG_TYPOGRAPHY_MULTIPLIER
         if capture_mode == "photo"
@@ -410,7 +395,6 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
         if field.get("is_key_field")
         and field.get("max_abs_z", 0) >= strong_threshold
         and buckets.get(field.get("bucket"), {}).get("sample_count", 0) >= STRONG_TYPOGRAPHY_MIN_BUCKET_SAMPLES
-        and _typography_features_agree(field, z_threshold_used)
     ]
     if not key_hits:
         return None
@@ -420,8 +404,11 @@ def _strongest_typography_key_field(typography_result: dict) -> dict | None:
 # Logical inconsistency (period/arithmetic) plus a TYPOGRAPHY-only anomaly, with no
 # ELA signal at all — the weakest of the standalone combinations, since typography
 # alone is already the noisiest of the visual signals (see STRONG_TYPOGRAPHY_FLOOR).
+# Requires a REAL inconsistency (a large arithmetic delta, or disagreeing periods) —
+# not just one mild "leve" difference plus "found >=3 key amounts", which used to be
+# enough on its own to reach the threshold below with no genuine discrepancy at all.
 CROSS_FAMILY_FLOOR = 40.0
-CROSS_FAMILY_CONSISTENCY_THRESHOLD = 2
+CROSS_FAMILY_CONSISTENCY_THRESHOLD = 3
 
 # ELA is a raw pixel-level measurement, not an OCR-derived heuristic — when a key field
 # has an actual local ELA anomaly AND some other independent inconsistency shows up
@@ -752,7 +739,7 @@ def build_document_type_response(file_name: str, type_result: dict, route: str, 
     }
 
 
-def build_category_only_response(file_name: str, type_result: dict, ocr_result: dict) -> dict:
+def build_category_only_response(file_name: str, type_result: dict, ocr_result: dict, timings: dict) -> dict:
     return {
         "status": "success",
         "analysis_route": "category_only",
@@ -765,6 +752,7 @@ def build_category_only_response(file_name: str, type_result: dict, ocr_result: 
             "component_scores": {},
             "evidence": ["Este tipo de documento no recibe control de fraude."],
         },
+        "timings": timings,
         "diagnostics": {
             "file_name": file_name,
             "document_type_classification": type_result,
@@ -773,7 +761,7 @@ def build_category_only_response(file_name: str, type_result: dict, ocr_result: 
     }
 
 
-def build_receipt_response(file_name: str, type_result: dict, ela_res: dict, metadata_res: dict, ocr_res: dict, local_ela_regions: list[dict], typography_res: dict) -> dict:
+def build_receipt_response(file_name: str, type_result: dict, ela_res: dict, metadata_res: dict, ocr_res: dict, local_ela_regions: list[dict], typography_res: dict, timings: dict) -> dict:
     final_decision = decision_engine(ela_res, metadata_res, ocr_res, local_ela_regions, typography_res)
     return {
         "status": "success",
@@ -781,6 +769,7 @@ def build_receipt_response(file_name: str, type_result: dict, ela_res: dict, met
         "document_type": type_result.get("document_type", "unknown"),
         "document_type_confidence": type_result.get("document_type_confidence", 0),
         "final_decision": final_decision,
+        "timings": timings,
         "diagnostics": {
             "file_name": file_name,
             "document_type_classification": type_result,
@@ -796,9 +785,13 @@ def build_receipt_response(file_name: str, type_result: dict, ela_res: dict, met
 
 def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
     logger.info(f"new analysis request received. Processing file: {file_name}")
+    overall_start = time.perf_counter()
+    timings: dict[str, float] = {}
 
     logger.info("Step 1: Classifying document type with CLIP...")
+    step_start = time.perf_counter()
     type_result = models["clip"].classify_document_type(temp_file_path)
+    timings["document_type_classification_s"] = round(time.perf_counter() - step_start, 3)
     if type_result.get("status") != "success":
         raise RuntimeError(type_result.get("message", "Document type classification failed"))
 
@@ -808,10 +801,12 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
     logger.info(f"Document type detected: {document_type} ({confidence}%)")
 
     if document_type in IDENTITY_ROUTES and confidence >= 45:
-        return build_category_only_response(file_name, type_result, {})
+        timings["total_s"] = round(time.perf_counter() - overall_start, 3)
+        return build_category_only_response(file_name, type_result, {}, timings)
 
     if document_type in CARD_ROUTES and confidence >= 45:
-        return build_category_only_response(file_name, type_result, {})
+        timings["total_s"] = round(time.perf_counter() - overall_start, 3)
+        return build_category_only_response(file_name, type_result, {}, timings)
 
     # Homebanking screenshots (transfers, "movimientos") go through full receipt
     # control instead of being categorized-only — they're just as fraud-prone
@@ -826,13 +821,19 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
     shared_image = Image.open(temp_file_path).convert("RGB")
 
     logger.info("Step 2: Running ELA (Pixel) Analysis...")
+    step_start = time.perf_counter()
     ela_res = models["ela"].analyze(shared_image)
+    timings["ela_global_s"] = round(time.perf_counter() - step_start, 3)
 
     logger.info("Step 3: Running Metadata Analysis...")
+    step_start = time.perf_counter()
     metadata_res = models["metadata"].analyze(temp_file_path)
+    timings["metadata_s"] = round(time.perf_counter() - step_start, 3)
 
     logger.info("Step 4: Running OCR Analysis...")
+    step_start = time.perf_counter()
     ocr_res = models["ocr"].analyze(temp_file_path)
+    timings["ocr_s"] = round(time.perf_counter() - step_start, 3)
 
     local_ela_regions = []
     candidate_regions = ocr_res.get("candidate_regions", [])
@@ -843,6 +844,7 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
     # shared in memory) — analyze every candidate field the OCR pass found instead of
     # an arbitrary top-N, so a genuinely tampered field never gets silently excluded
     # just because it ranked below some cutoff.
+    step_start = time.perf_counter()
     for candidate in candidate_regions:
         bbox = candidate.get("bbox")
         if not bbox:
@@ -873,16 +875,23 @@ def analyze_file_path(temp_file_path: str, file_name: str) -> dict:
         local_ela_regions.append(local_ela)
 
     _apply_relative_ela_calibration(local_ela_regions)
+    timings["local_ela_regions_s"] = round(time.perf_counter() - step_start, 3)
 
     capture_mode = metadata_res.get("capture_mode", "digital_or_scan")
 
+    step_start = time.perf_counter()
     if candidate_regions:
         logger.info("Step 5: Running Typography Consistency Analysis...")
         typography_res = models["typography"].analyze(shared_image, candidate_regions, capture_mode=capture_mode)
     else:
         typography_res = {"status": "success", "buckets": {}, "anomalous_fields": [], "capture_mode": capture_mode}
+    timings["typography_s"] = round(time.perf_counter() - step_start, 3)
 
-    return build_receipt_response(file_name, type_result, ela_res, metadata_res, ocr_res, local_ela_regions, typography_res)
+    timings["total_s"] = round(time.perf_counter() - overall_start, 3)
+
+    return build_receipt_response(
+        file_name, type_result, ela_res, metadata_res, ocr_res, local_ela_regions, typography_res, timings
+    )
 
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...)):

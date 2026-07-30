@@ -61,6 +61,10 @@ def build_audit_summary(file_name, data):
     score = decision.get("score")
     score_text = f"{score:.1f}/100" if isinstance(score, (int, float)) else "N/A"
     lines.append(f"Score de sospecha: {score_text} — {decision.get('risk_label', 'N/A')}")
+
+    timings = data.get("timings", {})
+    if timings.get("total_s") is not None:
+        lines.append(f"Tiempo total de análisis: {timings['total_s']:.2f}s")
     lines.append("")
 
     primary_reason = decision.get("primary_reason")
@@ -121,6 +125,7 @@ def render_analysis_result(index, uploaded_file, data):
     document_confidence = data.get("document_type_confidence", 0)
     extracted_fields = diags.get("extracted_fields", {})
     type_info = diags.get("document_type_classification", {})
+    timings = data.get("timings", {})
 
     title_score = f"{score:.1f}" if isinstance(score, (int, float)) else "N/A"
     with st.expander(f"{index + 1}. {uploaded_file.name} • {document_type} • {risk_label} • {title_score}", expanded=index < 2):
@@ -149,6 +154,8 @@ def render_analysis_result(index, uploaded_file, data):
             st.metric("Document Type", document_type)
             st.metric("Type Confidence", f"{document_confidence:.1f}%")
             st.write(f"**Route:** {analysis_route}")
+            if timings.get("total_s") is not None:
+                st.metric("Analysis Time", f"{timings['total_s']:.2f}s")
 
             if isinstance(score, (int, float)):
                 st.metric("Suspicion Score", f"{score:.1f}/100")
@@ -370,6 +377,23 @@ al reescaneo — y que por eso el ELA de compresión JPEG no detecta.
                 st.write(f"**Receipt Consistency:** {component_scores.get('receipt_consistency', 0):.1f}")
                 st.write(f"**Global ELA:** {component_scores.get('global_ela', 0):.1f}")
                 st.write(f"**Metadata:** {component_scores.get('metadata', 0):.1f} (informativo, no pesa en el score)")
+
+                if timings:
+                    st.markdown("---")
+                    st.markdown("#### ⏱ Tiempos de análisis")
+                    st.caption("Cuánto tardó cada etapa del pipeline, en segundos.")
+                    st.metric("Tiempo total", f"{timings.get('total_s', 0):.2f}s")
+                    stage_labels = {
+                        "document_type_classification_s": "Clasificación de documento (CLIP)",
+                        "ela_global_s": "ELA global",
+                        "metadata_s": "Metadata",
+                        "ocr_s": "OCR",
+                        "local_ela_regions_s": "ELA local por campo",
+                        "typography_s": "Tipografía",
+                    }
+                    for key, label in stage_labels.items():
+                        if key in timings:
+                            st.write(f"**{label}:** {timings[key]:.2f}s")
         else:
             tab1, tab2 = st.tabs(["Categorization", "Raw Signals"])
 
@@ -378,6 +402,8 @@ al reescaneo — y que por eso el ELA de compresión JPEG no detecta.
                 st.write(f"**Route:** {analysis_route}")
                 st.write(f"**Document type:** {document_type}")
                 st.write(f"**Confidence:** {document_confidence:.1f}%")
+                if timings.get("total_s") is not None:
+                    st.write(f"**Analysis time:** {timings['total_s']:.2f}s")
 
                 if document_type == "dni_front":
                     st.write("Documento identificado como DNI frente.")
