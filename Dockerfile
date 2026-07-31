@@ -4,12 +4,19 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# torch, numpy (OpenBLAS) and tesseract/leptonica can each bring their own OpenMP
-# runtime into the same process; left uncapped this is a well-known source of
-# silent segfaults (no Python traceback) after a handful of inferences in Docker.
-ENV OMP_NUM_THREADS=1
-ENV OPENBLAS_NUM_THREADS=1
-ENV MKL_NUM_THREADS=1
+# torch and numpy (OpenBLAS) can each bring their own OpenMP runtime into the same
+# process; left uncapped this is a well-known source of silent segfaults (no Python
+# traceback) after a handful of inferences in Docker. Forcing 1 thread was the
+# original, most conservative mitigation, but it also capped EasyOCR's CPU
+# throughput hard — and a segfault still happened even with it in place (root cause
+# traced instead to ela_detector.py's per-crop JPEG round-trip relying on the
+# garbage collector for cleanup — fixed separately), so the safety this buys is
+# limited. Now that start.sh auto-restarts the API on a crash, trading some of that
+# margin for real speed (this host has 4 cores; leave one free for Streamlit/the OS)
+# is a reasonable bet.
+ENV OMP_NUM_THREADS=4
+ENV OPENBLAS_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
 ENV KMP_DUPLICATE_LIB_OK=TRUE
 # transformers' Rust tokenizers (used by CLIPProcessor) warn/deadlock about
 # parallelism once a second process/thread appears in the container (here,

@@ -1,8 +1,11 @@
 import os
+import sys
 import tempfile
 import logging
 import statistics
 import time
+import threading
+import faulthandler
 from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -18,6 +21,24 @@ from backend.typography_detector import TypographyDetector
 
 logging.basicConfig(level=logging.INFO, format ='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("DeepFakeAPI")
+
+# Diagnostic instrumentation for the intermittent native segfault (no Python
+# traceback, no clear repro yet — timing relative to the last request is unclear
+# since the shell's "Segmentation fault (core dumped)" line has no timestamp of its
+# own). faulthandler sometimes recovers a partial Python-level stack even for a
+# crash that originates in native code; the heartbeat log gives an actual timestamp
+# trail so the NEXT crash can be placed precisely relative to the last real request
+# instead of just "adjacent in the log".
+faulthandler.enable(file=sys.stderr, all_threads=True)
+
+
+def _heartbeat_loop(interval_s: float = 5.0):
+    while True:
+        time.sleep(interval_s)
+        logger.info("heartbeat: process alive")
+
+
+threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
 
 RECEIPT_ROUTES = {"receipt", "unknown"}
 IDENTITY_ROUTES = {"dni_front", "dni_back"}
@@ -908,7 +929,7 @@ async def analyze_image(file: UploadFile = File(...)):
             status_code=503,
             detail=f"Models not initialized: {', '.join(missing_models)}"
         )
-    
+
     temp_dir = tempfile.gettempdir()
     file_suffix = os.path.splitext(file.filename)[1] or ".img"
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix, dir=temp_dir)
@@ -919,7 +940,7 @@ async def analyze_image(file: UploadFile = File(...)):
         with open(temp_file_path,"wb") as buffer:
             buffer.write(await file.read())
         return JSONResponse(content=analyze_file_path(temp_file_path, file.filename))
-    
+
     except Exception as e:
         logger.error(f"Error during analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=f"System Error: {str(e)}")

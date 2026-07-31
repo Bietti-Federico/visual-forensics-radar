@@ -21,10 +21,11 @@ class OCRDetector:
     """
     Lightweight OCR stage tuned for document triage.
     Extracts words, candidate numeric regions and a compact structural summary.
-    Backed by EasyOCR (neural detector+recognizer) instead of Tesseract — it handles
-    real-world photo conditions (colored/highlighted backgrounds, non-standard fonts,
-    perspective/fold noise) noticeably better than Tesseract's classical pipeline,
-    which was missing values often enough in practice to be worth the switch.
+    Backed by EasyOCR (neural detector+recognizer) — handles real-world photo
+    conditions like colored/highlighted backgrounds and non-standard fonts noticeably
+    better than a classical pipeline (Tesseract was tried side-by-side and read
+    significantly worse on these documents, so it was removed rather than kept as a
+    second, weaker option).
     """
 
     def __init__(self):
@@ -475,6 +476,9 @@ class OCRDetector:
             period_info = self.analyze_period_consistency(text_blob)
             periodo = period_info["periods_found"][0]["raw"] if period_info["periods_found"] else None
             line_items = self.extract_line_items(line_text_map, line_bbox_map, line_token_bboxes)
+            template_detail = self.extract_template_detail(
+                tipo_recibo, persona, line_text_map, line_bbox_map, line_token_bboxes
+            )
             receipt_consistency = self.analyze_receipt_consistency(
                 text_blob, mean_confidence, image=image, line_text_map=line_text_map, line_bbox_map=line_bbox_map,
                 line_token_bboxes=line_token_bboxes,
@@ -533,6 +537,7 @@ class OCRDetector:
                 "ocr_quality_score": min(richness_score, 4),
                 "receipt_consistency": receipt_consistency,
                 "line_items": line_items,
+                "template_detail": template_detail,
                 "extracted_fields": {
                     "dni_tramite": dni_tramite,
                     "dni_number": dni_number,
@@ -587,6 +592,15 @@ class OCRDetector:
             masked.append(match.replace(" ", ""))
         return list(dict.fromkeys(masked))
 
+    # A value token that legitimately belongs to a column starts (not just centers)
+    # at or after that column's own left edge — checking the CENTER instead let an
+    # oversized neighboring value (e.g. a long name overflowing past its own narrow
+    # header's width) bleed into the LAST column's zone whenever that column has no
+    # right neighbor to cap it (nothing stops an unbounded-right span). A small
+    # tolerance absorbs ordinary kerning/alignment jitter between a header and its
+    # value without reopening that hole.
+    LABELED_COLUMN_BOUNDARY_TOLERANCE_PX = 12
+
     def _find_labeled_column_value(
         self,
         label_pattern: re.Pattern,
@@ -594,7 +608,8 @@ class OCRDetector:
         line_bbox_map: dict,
         line_token_bboxes: dict,
         is_valid_value,
-    ) -> str | None:
+        find_all: bool = False,
+    ) -> str | list[str] | None:
         """
         Looks up a label that may appear either inline on the same line as its value
         ("CUIL: 20-44389704-7") or as a column header in a 2-line table — e.g. a
@@ -604,11 +619,20 @@ class OCRDetector:
         For the column-header case, the label's own column boundaries are taken from
         its IMMEDIATE neighboring header tokens on the same line (whatever sits to the
         left of the next column's header start, and to the right of the previous
-        column's header end) — every value-line token whose center falls inside that
-        span is collected, in left-to-right order, so a multi-word value (a full name
-        under a single "Titular" header) isn't truncated to just its nearest token.
+        column's header end) — every value-line token whose bbox falls inside that
+        span (start/end, not just center — see LABELED_COLUMN_BOUNDARY_TOLERANCE_PX) is
+        collected, in left-to-right order, so a multi-word value (a full name under a
+        single "Titular" header) isn't truncated to just its nearest token, while an
+        oversized NEIGHBORING value that merely overlaps the column's open edge (e.g.
+        the last column has no right neighbor to bound it) doesn't bleed in either.
+
+        By default returns the FIRST valid match found (document order). Some
+        templates repeat the same label more than once (e.g. a receipt showing a
+        "CUIL" column for both the titular and an unset "persona apoderada") — pass
+        `find_all=True` to collect every valid match instead, in document order.
         """
         ordered_lines = sorted(line_bbox_map.items(), key=lambda item: item[1][1])
+        results = []
 
         for position, (line_id, _bbox) in enumerate(ordered_lines):
             tokens = line_text_map.get(line_id, [])
@@ -624,7 +648,10 @@ class OCRDetector:
             # Inline: label and value share the same line.
             remainder = line_text[match.end():].strip(" :-.")
             if remainder and is_valid_value(remainder):
-                return remainder
+                if not find_all:
+                    return remainder
+                results.append(remainder)
+                continue
 
             # Column header: gather value-line tokens whose column falls between this
             # label's immediate left/right neighbors on the header line.
@@ -653,12 +680,12 @@ class OCRDetector:
             if not value_tokens or len(value_tokens) != len(value_bboxes):
                 continue
 
+            tolerance = self.LABELED_COLUMN_BOUNDARY_TOLERANCE_PX
             collected = []
             for value_text, value_bbox in zip(value_tokens, value_bboxes):
-                center = (value_bbox[0] + value_bbox[2]) / 2
-                if left_boundary is not None and center <= left_boundary:
+                if left_boundary is not None and value_bbox[0] < left_boundary - tolerance:
                     continue
-                if right_boundary is not None and center >= right_boundary:
+                if right_boundary is not None and value_bbox[2] > right_boundary + tolerance:
                     continue
                 collected.append((value_bbox[0], value_text))
 
@@ -667,9 +694,11 @@ class OCRDetector:
             collected.sort(key=lambda item: item[0])
             column_value = " ".join(text for _, text in collected).strip(" :-.")
             if column_value and is_valid_value(column_value):
-                return column_value
+                if not find_all:
+                    return column_value
+                results.append(column_value)
 
-        return None
+        return results if find_all else None
 
     def extract_cuil(
         self,
@@ -801,6 +830,231 @@ class OCRDetector:
         if bank_name and not any(keyword in lowered for keyword in self.PAYROLL_SIGNAL_KEYWORDS):
             return f"Homebanking / {bank_name}"
         return "Desconocido"
+
+    # --- ANSES-specific structured extraction -------------------------------------
+    # Each receipt template gets its own dedicated extraction flow once we've studied
+    # it closely enough to model its exact field layout — a generic schema (persona/
+    # cuil/periodo) is a reasonable lowest-common-denominator fallback, but templates
+    # like this one carry more structure (a titular AND a separate "persona apoderada"
+    # with their own CUIL each, a Concepto/Haberes/Deducciones table) worth capturing
+    # precisely instead of flattening into the generic fields.
+    PRESTACION_LABEL_PATTERN = re.compile(r"prestaci[oó]n", re.IGNORECASE)
+    BENEFICIO_LABEL_PATTERN = re.compile(r"n[°'\"]?\s*de\s*beneficio", re.IGNORECASE)
+    APODERADA_LABEL_PATTERN = re.compile(r"persona\s+apoderada", re.IGNORECASE)
+    CUIL_LABEL_PATTERN = re.compile(r"\bcuil\b", re.IGNORECASE)
+
+    CONCEPTO_HEADER_PATTERN = re.compile(r"\bconcepto\b", re.IGNORECASE)
+    HABERES_HEADER_PATTERN = re.compile(r"\bhaberes\b", re.IGNORECASE)
+    DEDUCCIONES_HEADER_PATTERN = re.compile(r"\bdeducciones\b", re.IGNORECASE)
+    SUBTOTAL_LABEL_PATTERN = re.compile(r"\bsubtotal\b", re.IGNORECASE)
+    TOTAL_A_COBRAR_LABEL_PATTERN = re.compile(r"total\s+a\s+cobrar", re.IGNORECASE)
+
+    def _looks_like_name(self, value: str) -> bool:
+        if not re.search(r"[A-Za-zÀ-ÿ]{3,}", value) or value.strip().isdigit():
+            return False
+        lowered = value.lower()
+        return not any(kw in lowered for kw in ("cuil", "dni", "titular", "personal", "beneficiario"))
+
+    def extract_template_detail(
+        self,
+        tipo_recibo: str,
+        persona: str | None,
+        line_text_map: dict,
+        line_bbox_map: dict,
+        line_token_bboxes: dict,
+    ) -> dict | None:
+        """
+        Dispatches to a template-specific extraction flow once `tipo_recibo` names a
+        receipt whose exact layout we've studied closely enough to model — each one
+        gets analyzed and added one at a time as real cases come in, rather than
+        forcing every template into one generic schema. Returns None for a template
+        that doesn't have a dedicated flow yet (the generic extracted_fields/
+        line_items above still apply regardless).
+        """
+        if tipo_recibo == "ANSES":
+            detail = self.extract_anses_detail(line_text_map, line_bbox_map, line_token_bboxes)
+            detail["titular"] = persona
+            return detail
+        return None
+
+    def extract_anses_detail(
+        self,
+        line_text_map: dict,
+        line_bbox_map: dict,
+        line_token_bboxes: dict,
+    ) -> dict:
+        """
+        Structured identity fields specific to the ANSES "Recibo de haberes" template:
+        a titular row (Prestación/Titular/CUIL) and a second, often-empty apoderada
+        row (N° de beneficio/Persona apoderada/CUIL) — both 3-column header+value
+        tables handled by _find_labeled_column_value, plus the CUIL label repeating
+        once per row (find_all=True keeps them in document order: titular's first,
+        apoderada's second).
+        """
+        prestacion = self._find_labeled_column_value(
+            self.PRESTACION_LABEL_PATTERN, line_text_map, line_bbox_map, line_token_bboxes,
+            is_valid_value=self._looks_like_name,
+        )
+        n_beneficio = self._find_labeled_column_value(
+            self.BENEFICIO_LABEL_PATTERN, line_text_map, line_bbox_map, line_token_bboxes,
+            is_valid_value=lambda v: bool(re.fullmatch(r"[0-9]{5,15}", v.replace(" ", "").strip())),
+        )
+        persona_apoderada = self._find_labeled_column_value(
+            self.APODERADA_LABEL_PATTERN, line_text_map, line_bbox_map, line_token_bboxes,
+            is_valid_value=self._looks_like_name,
+        )
+
+        cuils = []
+        for validator in (
+            lambda v: bool(self.CUIL_DASHED_PATTERN.fullmatch(v.replace(" ", "").strip())),
+            lambda v: bool(self.CUIL_PATTERN.fullmatch(v.replace(" ", "").strip())),
+        ):
+            found = self._find_labeled_column_value(
+                self.CUIL_LABEL_PATTERN, line_text_map, line_bbox_map, line_token_bboxes,
+                is_valid_value=validator, find_all=True,
+            )
+            for raw in found:
+                normalized = self.CUIL_PATTERN.fullmatch(raw.replace(" ", "").strip())
+                if normalized and normalized.group(1) not in cuils:
+                    cuils.append(normalized.group(1))
+
+        table = self.extract_concepto_haberes_deducciones_table(line_text_map, line_bbox_map, line_token_bboxes)
+
+        return {
+            "prestacion": prestacion,
+            "titular": None,  # filled in by the caller, which already has extract_person_name's result
+            "cuil_titular": cuils[0] if len(cuils) > 0 else None,
+            "n_beneficio": n_beneficio,
+            "persona_apoderada": persona_apoderada,
+            "cuil_apoderada": cuils[1] if len(cuils) > 1 else None,
+            "tabla_haberes_deducciones": table,
+        }
+
+    def extract_concepto_haberes_deducciones_table(
+        self,
+        line_text_map: dict,
+        line_bbox_map: dict,
+        line_token_bboxes: dict,
+    ) -> dict:
+        """
+        The ANSES payroll breakdown table: a "Concepto | Haberes | Deducciones" header
+        row, one row per concept (amount in whichever of the two columns applies), a
+        "Subtotal" row with ONE amount per column, and a closing "Total a cobrar" row.
+        Unlike extract_line_items (generic, single amount per line), several of these
+        rows carry TWO amounts side by side (the Subtotal row) — column position
+        against the header's own 3 zones tags each token correctly instead of the
+        generic extractor's "grab the trailing amount" rule mangling the first one.
+        """
+        empty_result = {
+            "detected": False, "items": [],
+            "subtotal_haberes": None, "subtotal_deducciones": None, "total_a_cobrar": None,
+        }
+
+        ordered_lines = sorted(line_bbox_map.items(), key=lambda item: item[1][1])
+
+        def match_span_bbox(tokens, bboxes, match):
+            boxes = []
+            cursor = 0
+            for token_text, token_bbox in zip(tokens, bboxes):
+                token_start, token_end = cursor, cursor + len(token_text)
+                if token_start < match.end() and token_end > match.start():
+                    boxes.append(token_bbox)
+                cursor = token_end + 1
+            if not boxes:
+                return None
+            return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+        header_position = None
+        concepto_box = haberes_box = deducciones_box = None
+        for position, (line_id, _bbox) in enumerate(ordered_lines):
+            tokens = line_text_map.get(line_id, [])
+            bboxes = line_token_bboxes.get(line_id, [])
+            if not tokens or len(tokens) != len(bboxes):
+                continue
+            line_text = " ".join(tokens)
+
+            concepto_m = self.CONCEPTO_HEADER_PATTERN.search(line_text)
+            haberes_m = self.HABERES_HEADER_PATTERN.search(line_text)
+            deducciones_m = self.DEDUCCIONES_HEADER_PATTERN.search(line_text)
+            if not (concepto_m and haberes_m and deducciones_m):
+                continue
+
+            concepto_box = match_span_bbox(tokens, bboxes, concepto_m)
+            haberes_box = match_span_bbox(tokens, bboxes, haberes_m)
+            deducciones_box = match_span_bbox(tokens, bboxes, deducciones_m)
+            header_position = position
+            break
+
+        if header_position is None or not (concepto_box and haberes_box and deducciones_box):
+            return empty_result
+
+        concepto_haberes_mid = (concepto_box[2] + haberes_box[0]) / 2
+        haberes_deducciones_mid = (haberes_box[2] + deducciones_box[0]) / 2
+
+        def zone_for(x_center: float) -> str:
+            if x_center < concepto_haberes_mid:
+                return "concepto"
+            if x_center < haberes_deducciones_mid:
+                return "haberes"
+            return "deducciones"
+
+        items = []
+        subtotal_haberes = subtotal_deducciones = total_a_cobrar = None
+
+        for position in range(header_position + 1, len(ordered_lines)):
+            line_id, _bbox = ordered_lines[position]
+            tokens = line_text_map.get(line_id, [])
+            bboxes = line_token_bboxes.get(line_id, [])
+            if not tokens or len(tokens) != len(bboxes):
+                continue
+            line_text = " ".join(tokens)
+
+            total_match = self.TOTAL_A_COBRAR_LABEL_PATTERN.search(line_text)
+            if total_match:
+                remainder = line_text[total_match.end():].strip(" :-.")
+                parsed = self.parse_amount(remainder) if remainder else None
+                if parsed is None and position + 1 < len(ordered_lines):
+                    next_line_id, _ = ordered_lines[position + 1]
+                    next_tokens = line_text_map.get(next_line_id, [])
+                    if next_tokens:
+                        parsed = self.parse_amount(" ".join(next_tokens))
+                total_a_cobrar = parsed
+                break
+
+            zone_tokens = {"concepto": [], "haberes": [], "deducciones": []}
+            for token_text, token_bbox in zip(tokens, bboxes):
+                center = (token_bbox[0] + token_bbox[2]) / 2
+                zone_tokens[zone_for(center)].append(token_text)
+
+            concepto_text = " ".join(zone_tokens["concepto"]).strip(" .:-")
+            haberes_text = " ".join(zone_tokens["haberes"]).strip()
+            deducciones_text = " ".join(zone_tokens["deducciones"]).strip()
+
+            haberes_value = self.parse_amount(haberes_text) if haberes_text and haberes_text != "-" else None
+            deducciones_value = self.parse_amount(deducciones_text) if deducciones_text and deducciones_text != "-" else None
+
+            if not concepto_text:
+                continue
+
+            if self.SUBTOTAL_LABEL_PATTERN.search(concepto_text):
+                subtotal_haberes = haberes_value
+                subtotal_deducciones = deducciones_value
+                continue
+
+            if haberes_value is not None or deducciones_value is not None:
+                items.append({
+                    "concepto": concepto_text,
+                    "haberes": haberes_value,
+                    "deducciones": deducciones_value,
+                })
+
+        return {
+            "detected": True,
+            "items": items,
+            "subtotal_haberes": subtotal_haberes,
+            "subtotal_deducciones": subtotal_deducciones,
+            "total_a_cobrar": total_a_cobrar,
+        }
 
     def parse_amount(self, raw_value: str) -> float | None:
         if not raw_value:
@@ -1209,7 +1463,7 @@ class OCRDetector:
         return crop.point(lambda pixel: 255 if pixel > threshold else 0)
 
     def _retry_read_line_amount(
-        self, image: Image.Image, keyword_patterns: list[str], line_text_map: dict, line_bbox_map: dict
+        self, image: Image.Image, keyword_patterns: list[str], line_text_map: dict, line_bbox_map: dict,
     ) -> tuple[float | None, str | None, int]:
         """
         Second attempt(s) at reading a value whose label was found but whose amount

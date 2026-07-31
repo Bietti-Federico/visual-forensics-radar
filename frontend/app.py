@@ -279,6 +279,31 @@ def render_analysis_result(index, uploaded_file, data):
                         for item in line_items
                     ])
 
+                template_detail = ocr_data.get("template_detail")
+                if template_detail:
+                    st.markdown(f"**Detalle específico de plantilla ({extracted_fields_ocr.get('tipo_recibo')}):**")
+                    st.write(f"**Prestación:** {template_detail.get('prestacion') or 'No detectado'}")
+                    st.write(f"**Titular:** {template_detail.get('titular') or 'No detectado'}")
+                    st.write(f"**CUIL titular:** {template_detail.get('cuil_titular') or 'No detectado'}")
+                    st.write(f"**N° de beneficio:** {template_detail.get('n_beneficio') or 'No detectado'}")
+                    st.write(f"**Persona apoderada:** {template_detail.get('persona_apoderada') or 'No detectado'}")
+                    st.write(f"**CUIL apoderada:** {template_detail.get('cuil_apoderada') or 'No detectado'}")
+
+                    tabla = template_detail.get("tabla_haberes_deducciones", {})
+                    if tabla.get("detected"):
+                        st.markdown("**Tabla Concepto / Haberes / Deducciones:**")
+                        st.table([
+                            {
+                                "Concepto": item.get("concepto", ""),
+                                "Haberes": item.get("haberes"),
+                                "Deducciones": item.get("deducciones"),
+                            }
+                            for item in tabla.get("items", [])
+                        ])
+                        st.write(f"**Subtotal Haberes:** {tabla.get('subtotal_haberes')}")
+                        st.write(f"**Subtotal Deducciones:** {tabla.get('subtotal_deducciones')}")
+                        st.write(f"**Total a cobrar:** {tabla.get('total_a_cobrar')}")
+
                 if receipt_consistency:
                     st.markdown("**Receipt consistency:**")
                     st.write(f"**Detected:** {receipt_consistency.get('detected', False)}")

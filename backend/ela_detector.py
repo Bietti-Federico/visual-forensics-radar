@@ -1,6 +1,5 @@
-import os
+import io
 import logging
-import tempfile
 
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
@@ -82,7 +81,10 @@ class ElaDetector:
         extra error on their own, unrelated to whether the text inside was edited;
         masking to just the ink sidesteps that instead of losing the field entirely.
         """
-        temp_filename = None
+        converted_img = None
+        compressed_img = None
+        ela_image = None
+        enhanced_image = None
 
         try:
             # Luminance only for the actual diff math — JPEG subsamples its color
@@ -91,23 +93,29 @@ class ElaDetector:
             # error that has nothing to do with tampering. Working in "L" bypasses
             # chroma subsampling entirely instead of picking it up as false signal.
             # This only affects ELA's own math, not the image callers pass in/reuse.
-            original_img = original_img.convert("L")
+            converted_img = original_img.convert("L")
 
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
-                temp_filename = tmp_file.name
-
-            original_img.save(temp_filename, "JPEG", quality=self.quality)
-            compressed_img = Image.open(temp_filename).convert("L")
+            # In-memory JPEG round-trip instead of a real temp file — this runs once
+            # per candidate field (dozens of times per request), and writing/reading/
+            # deleting an actual file that many times per request, relying on the
+            # garbage collector to eventually close the PIL Image/file handles
+            # instead of closing them deterministically, left native decoder state
+            # piling up across requests (see .close() calls below).
+            buffer = io.BytesIO()
+            converted_img.save(buffer, "JPEG", quality=self.quality)
+            buffer.seek(0)
+            compressed_img = Image.open(buffer)
+            compressed_img.load()  # force full decode now, while the buffer is valid
 
             # Calculate the mathematical difference between the two images (A - B)
-            ela_image = ImageChops.difference(original_img, compressed_img)
+            ela_image = ImageChops.difference(converted_img, compressed_img)
 
             # Enhance brightness to make the pixel differences visible to the human eye
             # Find the maximum pixel difference to adjust the black/white balance scale
 
             ink_mask = None
             if mask_to_ink:
-                ink_mask = _ink_mask(np.asarray(original_img, dtype=np.float64))
+                ink_mask = _ink_mask(np.asarray(converted_img, dtype=np.float64))
 
             if ink_mask is not None and ink_mask.any():
                 diff_array = np.asarray(ela_image, dtype=np.float64)
@@ -121,17 +129,12 @@ class ElaDetector:
 
             if max_diff == 0:
                 max_diff = 1 # Prevent division by zero error on completely flat images
-            
+
             scale = 255.0 / max_diff
-            ela_image = ImageEnhance.Brightness(ela_image).enhance(scale)
+            enhanced_image = ImageEnhance.Brightness(ela_image).enhance(scale)
 
             if output_path:
-                ela_image.save(output_path)
-
-            if temp_filename and os.path.exists(temp_filename):
-                os.remove(temp_filename)
-
-            if output_path:
+                enhanced_image.save(output_path)
                 logger.info(f"ELA Analysis complete. Heatmap saved to: {output_path}")
             else:
                 logger.info("ELA Analysis complete.")
@@ -149,14 +152,21 @@ class ElaDetector:
                 "ink_masked": bool(ink_mask is not None and ink_mask.any()),
 
             }
-        
-        except Exception as e:
 
-            if temp_filename and os.path.exists(temp_filename):
-                os.remove(temp_filename)
-            
+        except Exception as e:
             logger.error(f"Error during ELA analysis: {str(e)}")
             return {"status":"error", "message":str(e)}
+        finally:
+            # Close every intermediate image WE created explicitly instead of
+            # leaving it to the garbage collector — never close `original_img`
+            # itself, since callers (e.g. main.py's per-field ELA loop) reuse that
+            # same shared, already-open image across dozens of crops per request.
+            for img in (compressed_img, ela_image, enhanced_image, converted_img):
+                if img is not None:
+                    try:
+                        img.close()
+                    except Exception:
+                        pass
 
     @staticmethod
     def _load(image_source: str | Image.Image) -> Image.Image:
@@ -200,6 +210,7 @@ class ElaDetector:
         restricts the measurement to the crop's own text/ink pixels — use it for a
         field with a highlighted/colored background instead of skipping it outright.
         """
+        crop = None
         try:
             image = self._load(image_source)
             padded_box = crop_box
@@ -210,6 +221,16 @@ class ElaDetector:
         except Exception as e:
             logger.error(f"Error during cropped ELA analysis: {str(e)}")
             return {"status":"error", "message":str(e)}
+        finally:
+            # `crop` is a fresh, unshared Image made for this one call (unlike
+            # `image`/`image_source`, which the caller may reuse across dozens of
+            # other crops in the same request) — closing it explicitly here matters
+            # for the same reason as _analyze_image's own cleanup above.
+            if crop is not None:
+                try:
+                    crop.close()
+                except Exception:
+                    pass
         
 
 if __name__ == "__main__":
