@@ -174,6 +174,36 @@ PdfValue = (
     | PdfStream
 )
 
+#: Stable, public COS-type names for a `PdfValue` — shared by any caller that
+#: needs to classify object types (a feature histogram, a structural-shape
+#: hash, ...), so those callers can never silently drift out of sync with
+#: each other on what a given type is called.
+_COS_TYPE_NAMES: tuple[tuple[type, str], ...] = (
+    (PdfNull, "null"),
+    (PdfBoolean, "boolean"),
+    (PdfNumber, "number"),
+    (PdfName, "name"),
+    (PdfLiteralString, "literal_string"),
+    (PdfHexString, "hex_string"),
+    (PdfReference, "reference"),
+    (PdfArray, "array"),
+    (PdfDictionary, "dictionary"),
+    (PdfStream, "stream"),
+)
+
+
+#: Every name `cos_type_name()` can return, in the same order as `_COS_TYPE_NAMES`
+#: — useful for a caller building a zero-initialized histogram over all types.
+COS_TYPE_NAMES: tuple[str, ...] = tuple(name for _, name in _COS_TYPE_NAMES)
+
+
+def cos_type_name(value: PdfValue) -> str:
+    """The stable name of `value`'s COS type, e.g. `"dictionary"`, `"stream"`."""
+    for cos_type, name in _COS_TYPE_NAMES:
+        if isinstance(value, cos_type):
+            return name
+    raise TypeError(f"Unrecognized PdfValue type: {type(value)!r}")  # unreachable for a real value
+
 
 @dataclass(frozen=True, slots=True)
 class PdfObject:
