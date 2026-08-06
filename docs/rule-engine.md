@@ -32,9 +32,23 @@ of this abstraction, not something to engineer around.
 | `trailer_missing_root` | no `/Root` in the trailer | WARNING | Matches Module 1's `TRAILER_MISSING_ROOT` severity |
 
 **Explicitly deferred**, same pattern as prior modules: font inconsistencies,
-XMP mismatch, linearization anomalies (all need capabilities not yet built),
-and generator/producer identification (a separate future ML classifier per
-the platform's design brief, not something a hand-written rule should guess at).
+XMP mismatch, linearization anomalies (all need capabilities not yet built).
+
+## An 8th rule, added once Entity Identification existed: `entity_template_mismatch`
+
+`plugins/rules/entity_template_mismatch_rule.py`, wired via a *separate*
+`default_entity_aware_rules()` (not `default_rules()`) because it needs an
+`EntityIdentificationReport`, not just a `FeatureSet` — see
+`application/rule_engine/entity_aware_ports.py` for why that's a distinct,
+narrower `Protocol` rather than a breaking change to `RulePlugin` itself.
+Flags a document confidently identified as a known entity (ANSES / La Rioja
+/ Jujuy) whose structure contradicts that entity's known invariant
+(`catalog.has_acroform`) — see `docs/entity-identification.md`.
+
+Callers run both use cases and merge their `RuleEvaluationReport`s (plain
+list concatenation — the type has no notion of "which use case produced
+this finding") before handing the result to Explainability/Risk Report,
+which need no changes to consume entity-aware findings.
 
 ## A rule never guesses
 

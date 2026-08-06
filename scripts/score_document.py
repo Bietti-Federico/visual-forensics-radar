@@ -38,9 +38,13 @@ from pdf_forensics.application.pdf_analysis.parse_pdf_use_case import ParsePdfUs
 from pdf_forensics.application.risk_report.generate_risk_report_use_case import (
     GenerateRiskReportUseCase,
 )
+from pdf_forensics.application.rule_engine.evaluate_entity_aware_rules_use_case import (
+    EvaluateEntityAwareRulesUseCase,
+)
 from pdf_forensics.application.rule_engine.evaluate_rules_use_case import EvaluateRulesUseCase
+from pdf_forensics.domain.rules.rule_report import RuleEvaluationReport
 from pdf_forensics.plugins.features import default_feature_extractors
-from pdf_forensics.plugins.rules import default_rules
+from pdf_forensics.plugins.rules import default_entity_aware_rules, default_rules
 
 
 def main() -> None:
@@ -60,11 +64,19 @@ def main() -> None:
     feature_set = extract_features.execute(document)
     fingerprint = GenerateFingerprintUseCase().execute(document, feature_set)
 
-    rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
     anomaly_report = DetectAnomaliesUseCase(detectors).execute(feature_set)
     ml_report = PredictUseCase(models).execute(feature_set)
     shap_explanations = ExplainPredictionUseCase(models).execute(feature_set)
     entity_report = IdentifyEntityUseCase(entity_classifiers).execute(feature_set)
+
+    plain_rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
+    entity_aware_rule_report = EvaluateEntityAwareRulesUseCase(
+        default_entity_aware_rules()
+    ).execute(feature_set, entity_report)
+    rule_report = RuleEvaluationReport(
+        findings=list(plain_rule_report) + list(entity_aware_rule_report)
+    )
+
     explanation = GenerateExplanationUseCase().execute(
         rule_report, anomaly_report, ml_report, shap_explanations
     )
