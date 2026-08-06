@@ -13,12 +13,15 @@ from __future__ import annotations
 
 # Substring patterns (matched case-insensitively against a generator's
 # `external:<stem>` string, or a plain filename stem) that identify each
-# known entity. Extend this when new real documents are added for an entity
-# already listed, or add a new entry for a new entity.
+# known entity. Kept as single broad substrings (not per-document patterns)
+# specifically so a new real document or field-substitution template for an
+# entity already listed here needs no change — e.g. "anses10__variant..."
+# and "anses11__variant..." both already match "anses" without being added
+# explicitly. Only add a new dict entry when a genuinely new entity shows up.
 ENTITY_PATTERNS: dict[str, tuple[str, ...]] = {
-    "ANSES": ("recibo-anses", "anses ", "anses__variant"),
-    "LA_RIOJA": ("recibo municipalidad la rioja", "mrioj", "la_rioja__variant"),
-    "JUJUY": ("recibo municipalidad de jujuy", "mjujuy", "jujuy__variant"),
+    "ANSES": ("anses",),
+    "LA_RIOJA": ("la rioja", "la_rioja", "mrioj"),
+    "JUJUY": ("jujuy", "mjujuy"),
 }
 
 
