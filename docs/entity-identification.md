@@ -31,31 +31,42 @@ in ANSES's case, an *identical* `structure_hash`/`page_tree_hash` (Module
 This is exactly the kind of pattern a classifier can learn cheaply and
 reliably, even from a handful of real documents per entity.
 
-## A second invariant, found by comparing real documents across entities
+## More invariants, found by comparing real documents across entities
 
-`catalog.has_acroform` (Module 2) is a perfect per-entity invariant across
-every real document sampled so far:
+Restricting the comparison to *only* the untouched real documents (not their
+transformations, and not the synthetic field-substituted variants — see
+below for why that separation matters) surfaced two perfect per-entity
+invariants:
 
-| Entity | `catalog.has_acroform` | Notes |
+| Entity | `catalog.has_acroform` | Embedded JPEGs (`streams.filter_histogram["DCTDecode"]`) |
 |---|---|---|
-| ANSES | always `True` | Matches the "Firmado Digitalmente por ANSES" badge visible on genuine receipts — a real `/AcroForm` digital-signature structure, not just text |
-| Municipalidad de La Rioja | always `False` | |
-| Municipalidad de San Salvador de Jujuy | always `False` | |
+| ANSES | always `True` | always `0` |
+| Municipalidad de La Rioja | always `False` | always `1` |
+| Municipalidad de San Salvador de Jujuy | always `False` | always `2` |
 
-This is specific and verifiable enough to be its own Rule Engine rule
-(`entity_template_mismatch`, `docs/rule-engine.md`) rather than folded into
-the confidence-only `entity_consistency` score — a document identified as
-ANSES without an AcroForm is a concrete, named contradiction, not just "low
-confidence."
+`catalog.has_acroform=True` matches the "Firmado Digitalmente por ANSES"
+badge visible on genuine receipts — a real `/AcroForm` digital-signature
+structure, not just text. The embedded-JPEG count is most likely each
+entity's fixed letterhead/seal artwork; note ANSES's 4 real samples were all
+1-page/51-object/14-stream with essentially no other structural variation
+at all beyond file size (a few KB, from different names/amounts) and dates
+— an unusually rigid template even by these entities' standards.
+
+Both invariants are specific and verifiable enough to be their own Rule
+Engine rule (`entity_template_mismatch`, `docs/rule-engine.md`) rather than
+folded into the confidence-only `entity_consistency` score — a document
+identified as ANSES without an AcroForm, or with an embedded JPEG ANSES
+never uses, is a concrete, named contradiction, not just "low confidence."
 
 Numeric structural features (`general.object_count`, `xref.in_use_entry_count`)
-did **not** turn out to be clean per-entity invariants yet — they split into
-two disjoint clusters per entity: the handful of untouched real documents,
-and the synthetic field-substituted variants (`pdf-forensics-benchmark`'s
-`FieldSubstitutionGenerator`), which get a different low-level byte
-structure from PyMuPDF's resave (a known, documented limitation of that
-generator). More untouched real documents per entity, not more synthetic
-variants, is what would make these usable as "expected envelope" checks.
+did **not** turn out to be clean per-entity invariants when the training set
+also includes synthetic field-substituted variants — they split into two
+disjoint clusters per entity: the handful of untouched real documents, and
+the variants (`pdf-forensics-benchmark`'s `FieldSubstitutionGenerator`),
+which get a different low-level byte structure from PyMuPDF's resave (a
+known, documented limitation of that generator). More untouched real
+documents per entity, not more synthetic variants, is what would make these
+usable as "expected envelope" checks too.
 
 ## What this is NOT
 

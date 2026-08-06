@@ -42,8 +42,9 @@ XMP mismatch, linearization anomalies (all need capabilities not yet built).
 `application/rule_engine/entity_aware_ports.py` for why that's a distinct,
 narrower `Protocol` rather than a breaking change to `RulePlugin` itself.
 Flags a document confidently identified as a known entity (ANSES / La Rioja
-/ Jujuy) whose structure contradicts that entity's known invariant
-(`catalog.has_acroform`) — see `docs/entity-identification.md`.
+/ Jujuy) whose structure contradicts that entity's known invariants
+(`catalog.has_acroform`, embedded JPEG count) — see
+`docs/entity-identification.md`.
 
 Callers run both use cases and merge their `RuleEvaluationReport`s (plain
 list concatenation — the type has no notion of "which use case produced

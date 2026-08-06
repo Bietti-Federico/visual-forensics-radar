@@ -19,55 +19,93 @@ def _report(entity: str, confidence: float) -> EntityIdentificationReport:
     )
 
 
+def _anses_conforming_features() -> dict:
+    return {
+        "catalog.has_acroform": True,
+        "streams.filter_histogram": {"FlateDecode": 14},
+    }
+
+
 def test_flags_anses_prediction_without_acroform() -> None:
-    feature_set = build_feature_set({"catalog.has_acroform": False})
-    finding = EntityTemplateMismatchRule().evaluate(feature_set, _report("ANSES", 0.9))
+    features = _anses_conforming_features()
+    features["catalog.has_acroform"] = False
+    finding = EntityTemplateMismatchRule().evaluate(
+        build_feature_set(features), _report("ANSES", 0.9)
+    )
 
     assert finding is not None
     assert finding.rule_id == "entity_template_mismatch"
     assert "ANSES" in finding.explanation
+    assert "AcroForm" in finding.explanation
 
 
-def test_does_not_flag_anses_prediction_with_acroform() -> None:
-    feature_set = build_feature_set({"catalog.has_acroform": True})
-    finding = EntityTemplateMismatchRule().evaluate(feature_set, _report("ANSES", 0.9))
+def test_flags_anses_prediction_with_embedded_jpeg() -> None:
+    features = _anses_conforming_features()
+    features["streams.filter_histogram"] = {"FlateDecode": 12, "DCTDecode": 1}
+    finding = EntityTemplateMismatchRule().evaluate(
+        build_feature_set(features), _report("ANSES", 0.9)
+    )
 
+    assert finding is not None
+    assert "DCTDecode" in finding.explanation
+
+
+def test_does_not_flag_fully_conforming_anses_prediction() -> None:
+    finding = EntityTemplateMismatchRule().evaluate(
+        build_feature_set(_anses_conforming_features()), _report("ANSES", 0.9)
+    )
     assert finding is None
 
 
 def test_flags_la_rioja_prediction_with_unexpected_acroform() -> None:
-    feature_set = build_feature_set({"catalog.has_acroform": True})
-    finding = EntityTemplateMismatchRule().evaluate(feature_set, _report("LA_RIOJA", 0.8))
+    features = {"catalog.has_acroform": True, "streams.filter_histogram": {"DCTDecode": 1}}
+    finding = EntityTemplateMismatchRule().evaluate(
+        build_feature_set(features), _report("LA_RIOJA", 0.8)
+    )
 
     assert finding is not None
     assert "LA_RIOJA" in finding.explanation
 
 
-def test_low_confidence_prediction_does_not_trigger() -> None:
-    feature_set = build_feature_set({"catalog.has_acroform": False})
-    finding = EntityTemplateMismatchRule().evaluate(feature_set, _report("ANSES", 0.5))
-
-    assert finding is None
-
-
-def test_unknown_entity_does_not_trigger() -> None:
-    feature_set = build_feature_set({"catalog.has_acroform": False})
+def test_flags_jujuy_prediction_with_wrong_image_count() -> None:
+    features = {"catalog.has_acroform": False, "streams.filter_histogram": {"DCTDecode": 1}}
     finding = EntityTemplateMismatchRule().evaluate(
-        feature_set, _report("SYNTHETIC_REFERENCE", 0.99)
+        build_feature_set(features), _report("JUJUY", 0.8)
+    )
+
+    assert finding is not None
+    assert "JUJUY" in finding.explanation
+
+
+def test_low_confidence_prediction_does_not_trigger() -> None:
+    features = _anses_conforming_features()
+    features["catalog.has_acroform"] = False
+    finding = EntityTemplateMismatchRule().evaluate(
+        build_feature_set(features), _report("ANSES", 0.5)
     )
 
     assert finding is None
 
 
-def test_missing_feature_does_not_trigger() -> None:
-    feature_set = build_feature_set({})
-    finding = EntityTemplateMismatchRule().evaluate(feature_set, _report("ANSES", 0.9))
+def test_unknown_entity_does_not_trigger() -> None:
+    features = {"catalog.has_acroform": False}
+    finding = EntityTemplateMismatchRule().evaluate(
+        build_feature_set(features), _report("SYNTHETIC_REFERENCE", 0.99)
+    )
+
+    assert finding is None
+
+
+def test_missing_features_do_not_trigger() -> None:
+    finding = EntityTemplateMismatchRule().evaluate(build_feature_set({}), _report("ANSES", 0.9))
 
     assert finding is None
 
 
 def test_empty_entity_report_does_not_trigger() -> None:
-    feature_set = build_feature_set({"catalog.has_acroform": False})
-    finding = EntityTemplateMismatchRule().evaluate(feature_set, EntityIdentificationReport())
+    features = {"catalog.has_acroform": False}
+    finding = EntityTemplateMismatchRule().evaluate(
+        build_feature_set(features), EntityIdentificationReport()
+    )
 
     assert finding is None
