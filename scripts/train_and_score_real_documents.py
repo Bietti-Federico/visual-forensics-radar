@@ -119,8 +119,12 @@ def main() -> None:
     parser.add_argument(
         "--real-weight",
         type=float,
-        default=8.0,
-        help="How many times more a genuinely real document counts vs. a synthetic variant.",
+        default=16.0,
+        help=(
+            "How many times more a genuinely real document counts vs. a synthetic "
+            "variant. See scripts/train_and_save_models.py's module docstring for "
+            "the leave-one-out sweep this default was chosen from."
+        ),
     )
     args = parser.parse_args()
 

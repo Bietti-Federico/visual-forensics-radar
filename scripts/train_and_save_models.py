@@ -9,9 +9,15 @@ Usage:
     poetry run python scripts/train_and_save_models.py \
         <benchmark_output_dir> <model_store_path> [real_weight]
 
-`real_weight` (default 8.0) is how many times more each genuinely real
+`real_weight` (default 16.0) is how many times more each genuinely real
 document (and its direct transformations) counts relative to a synthetic
-field-substituted variant — see scripts/_training_weights.py.
+field-substituted variant — see scripts/_training_weights.py. Chosen via a
+leave-one-real-document-out sweep: ML Ensemble separation between held-out
+real originals and their transforms keeps improving up to at least 32x
+(0.937 at 8x -> 0.948 at 16x -> 0.951 at 32x, real_probability/mean), while
+Entity Identification confidence on the two smallest-n (Jujuy) documents
+starts dropping past 16x — 16x captures most of the ML Ensemble gain without
+that cost.
 """
 
 from __future__ import annotations
@@ -52,7 +58,7 @@ def main() -> None:
 
     benchmark_output_dir = Path(sys.argv[1])
     model_store_path = Path(sys.argv[2])
-    real_weight = float(sys.argv[3]) if len(sys.argv) == 4 else 8.0
+    real_weight = float(sys.argv[3]) if len(sys.argv) == 4 else 16.0
 
     dataset = BuildTrainingDatasetUseCase(
         parse_pdf_use_case=ParsePdfUseCase(),
