@@ -8,6 +8,20 @@ packages = [{ include = "pdf_forensics", from = "src" }]
 
 [tool.poetry.dependencies]
 python = "^3.12"
+scikit-learn = "^1.5"
+torch = { version = "^2.4", source = "pytorch-cpu" }
+xgboost = "^2.1"
+shap = "^0.46"
+# shap pulls in numba (for its fast TreeExplainer path), whose own default
+# resolution can drag in a pre-3.12 llvmlite that fails to build under
+# Python 3.12 (setuptools' spawn() signature changed). Pinning numba
+# explicitly to a version with real 3.12 support forces a compatible
+# llvmlite to be selected too.
+numba = "^0.60"
+# Persists fitted Anomaly Detection / ML Ensemble plugin instances to disk
+# (application/model_persistence/). scikit-learn already depends on joblib
+# transitively; declared directly here since our own code imports it.
+joblib = "^1.4"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.10"
@@ -16,6 +30,11 @@ mypy = "^1.11"
 pytest = "^8.3"
 pytest-cov = "^5.0"
 pre-commit = "^3.8"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core"]
@@ -37,6 +56,13 @@ select = ["E", "F", "I", "B", "UP"]
 python_version = "3.12"
 strict = true
 files = ["src"]
+
+[[tool.mypy.overrides]]
+# scikit-learn and shap ship no inline types/py.typed marker as of these
+# versions; torch and xgboost do and need no override. Scoped to these two
+# modules only, not a blanket relaxation of strict mode.
+module = ["sklearn.*", "shap.*", "joblib.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
