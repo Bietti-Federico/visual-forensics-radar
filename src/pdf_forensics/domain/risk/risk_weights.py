@@ -47,3 +47,24 @@ class RiskWeights:
         )
         if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
             raise ValueError(f"RiskWeights must sum to 1.0, got {total}.")
+
+    def without_ml_probability(self) -> RiskWeights:
+        """
+        Zeroes `ml_probability` and rescales the other six proportionally so
+        they still sum to 1.0 — for an entity ML Ensemble hasn't been fit for
+        yet (not enough labeled genuine/confirmed-fraud examples). See
+        `application/document_scoring/score_document_use_case.py`.
+        """
+        remainder = 1.0 - self.ml_probability
+        if remainder <= 0.0:
+            raise ValueError("Cannot rescale: ml_probability accounts for the entire weight.")
+        factor = 1.0 / remainder
+        return RiskWeights(
+            rule_engine=self.rule_engine * factor,
+            ml_probability=0.0,
+            anomaly_detection=self.anomaly_detection * factor,
+            structural=self.structural * factor,
+            metadata=self.metadata * factor,
+            entity_consistency=self.entity_consistency * factor,
+            signature_integrity=self.signature_integrity * factor,
+        )

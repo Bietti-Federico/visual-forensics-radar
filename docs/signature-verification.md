@@ -69,3 +69,16 @@ signature_report = VerifySignaturesUseCase().execute(pdf_bytes)
 for result in signature_report:
     print(result.field_name, result.digest_intact, result.cryptographically_valid, result.coverage)
 ```
+
+## Safe to call from inside an already-running event loop
+
+pyHanko's own signature validation is async internally and wraps it with
+`asyncio.run(...)`, which raises if a loop is already running — as one
+always is inside an `async def` FastAPI route handler. `pyhanko_adapter.py`
+calls pyHanko's async entry point directly through a small
+`_run_coro_sync` helper that detects this case and, if a loop is already
+running, executes the coroutine on a dedicated thread instead. See
+`docs/api.md`'s "A signature-verification pitfall this surfaced" section
+for how this was found — the per-signature `try/except` here originally
+swallowed the resulting `RuntimeError` silently, dropping every signature
+found when verified through the API.

@@ -10,3 +10,9 @@ dist/
 build/
 .venv/
 venv/
+
+# Runtime state for the verification API — real uploaded training
+# documents and the trained model bundle. Grown by /training-data/* and
+# /retrain, never checked in (real documents may contain personal data).
+/training_corpus/
+/model_store.joblib

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>PDF Forensics — Verificación</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #1a1a2e; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2.5rem; border-bottom: 1px solid #ccc; padding-bottom: 0.3rem; }
+  section { margin-bottom: 1.5rem; }
+  .drop { border: 2px dashed #888; border-radius: 8px; padding: 2rem; text-align: center; cursor: pointer; }
+  .drop.drag { background: #eef; border-color: #33c; }
+  button { padding: 0.5rem 1rem; cursor: pointer; }
+  input[type=text] { padding: 0.4rem; margin-right: 0.5rem; }
+  pre { background: #f4f4f8; padding: 1rem; overflow-x: auto; border-radius: 6px; white-space: pre-wrap; }
+  table { border-collapse: collapse; margin-top: 0.5rem; }
+  td, th { border: 1px solid #ccc; padding: 0.3rem 0.6rem; text-align: left; font-size: 0.9rem; }
+  .risk-high { color: #b00020; font-weight: bold; }
+  .risk-mid { color: #b06a00; font-weight: bold; }
+  .risk-low { color: #0a7d2c; font-weight: bold; }
+  .muted { color: #666; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>PDF Forensics — Verificación y entrenamiento</h1>
+
+<section>
+  <h2>Verificar un documento</h2>
+  <div id="verify-drop" class="drop">Arrastrá un PDF acá, o hacé click para elegir uno</div>
+  <input id="verify-input" type="file" accept="application/pdf" style="display:none" />
+  <div id="verify-result"></div>
+</section>
+
+<section>
+  <h2>Corpus de entrenamiento</h2>
+  <div id="corpus-summary" class="muted">Cargando…</div>
+  <table id="corpus-table"></table>
+</section>
+
+<section>
+  <h2>Agregar documento de entrenamiento</h2>
+  <input id="upload-entity" type="text" placeholder="Entidad (ej: ANSES)" />
+  <select id="upload-kind">
+    <option value="genuine">Genuino</option>
+    <option value="confirmed-fraud">Fraude confirmado</option>
+  </select>
+  <input id="upload-input" type="file" accept="application/pdf" />
+  <button id="upload-btn">Subir</button>
+  <div id="upload-result" class="muted"></div>
+</section>
+
+<section>
+  <h2>Reentrenar modelo</h2>
+  <button id="retrain-btn">Reentrenar ahora</button>
+  <pre id="retrain-result"></pre>
+</section>
+
+<script>
+async function refreshCorpusSummary() {
+  const res = await fetch('/training-data/summary');
+  const data = await res.json();
+  const entities = Object.keys(data.entities).sort();
+  document.getElementById('corpus-summary').textContent =
+    entities.length ? `${entities.length} entidad(es) en el corpus.` : 'Sin documentos todavía.';
+  const table = document.getElementById('corpus-table');
+  table.innerHTML = '<tr><th>Entidad</th><th>Genuinos</th><th>Fraude confirmado</th></tr>' +
+    entities.map(e => `<tr><td>${e}</td><td>${data.entities[e].genuine}</td><td>${data.entities[e].confirmed_fraud}</td></tr>`).join('');
+}
+
+function riskClass(score) {
+  if (score >= 50) return 'risk-high';
+  if (score >= 25) return 'risk-mid';
+  return 'risk-low';
+}
+
+async function verifyFile(file) {
+  const resultDiv = document.getElementById('verify-result');
+  resultDiv.innerHTML = '<p class="muted">Analizando…</p>';
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch('/verify', { method: 'POST', body: formData });
+  if (!res.ok) {
+    resultDiv.innerHTML = `<p class="risk-high">Error: ${res.status} ${await res.text()}</p>`;
+    return;
+  }
+  const data = await res.json();
+  const entities = data.entity_predictions.map(p =>
+    `${p.predicted_entity} (${(p.confidence * 100).toFixed(0)}%)`).join(', ') || 'sin predicción';
+  const signatures = data.signatures.length
+    ? data.signatures.map(s => `${s.field_name}: intact=${s.digest_intact} valid=${s.cryptographically_valid} coverage=${s.coverage}`).join('<br>')
+    : 'sin firma embebida';
+  resultDiv.innerHTML = `
+    <p>Riesgo: <span class="${riskClass(data.risk_score)}">${data.risk_score}/100</span></p>
+    <p>Entidad: ${entities}</p>
+    <p>Firma: ${signatures}</p>
+    <p>Motivos:</p>
+    <pre>${data.reasons.join('\n') || '(ninguno)'}</pre>
+  `;
+}
+
+const dropZone = document.getElementById('verify-drop');
+const verifyInput = document.getElementById('verify-input');
+dropZone.addEventListener('click', () => verifyInput.click());
+verifyInput.addEventListener('change', () => { if (verifyInput.files[0]) verifyFile(verifyInput.files[0]); });
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag');
+  if (e.dataTransfer.files[0]) verifyFile(e.dataTransfer.files[0]);
+});
+
+document.getElementById('upload-btn').addEventListener('click', async () => {
+  const entity = document.getElementById('upload-entity').value.trim();
+  const kind = document.getElementById('upload-kind').value;
+  const file = document.getElementById('upload-input').files[0];
+  const resultDiv = document.getElementById('upload-result');
+  if (!entity || !file) {
+    resultDiv.textContent = 'Completá la entidad y elegí un archivo.';
+    return;
+  }
+  const formData = new FormData();
+  formData.append('entity', entity);
+  formData.append('file', file);
+  const endpoint = kind === 'genuine' ? '/training-data/genuine' : '/training-data/confirmed-fraud';
+  const res = await fetch(endpoint, { method: 'POST', body: formData });
+  if (!res.ok) {
+    resultDiv.textContent = `Error: ${res.status} ${await res.text()}`;
+    return;
+  }
+  const data = await res.json();
+  resultDiv.textContent = `Guardado: ${data.saved_to}`;
+  refreshCorpusSummary();
+});
+
+document.getElementById('retrain-btn').addEventListener('click', async () => {
+  const resultPre = document.getElementById('retrain-result');
+  resultPre.textContent = 'Reentrenando…';
+  const res = await fetch('/retrain', { method: 'POST' });
+  const data = await res.json();
+  resultPre.textContent = JSON.stringify(data, null, 2);
+  refreshCorpusSummary();
+});
+
+refreshCorpusSummary();
+</script>
+
+</body>
+</html>

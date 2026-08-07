@@ -23,7 +23,10 @@ from typing import Any
 
 import joblib
 
-MODEL_STORE_SCHEMA_VERSION = "1.0.0"
+#: 2.0.0: switched from one global detector/model set to a per-entity bundle
+#: (`application/model_persistence/entity_model_bundle.py`) — an old 1.0.0
+#: store is incompatible on purpose, not silently misread.
+MODEL_STORE_SCHEMA_VERSION = "2.0.0"
 
 
 def save_bundle(path: str | Path, bundle: dict[str, Any]) -> None:

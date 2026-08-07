@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from pdf_forensics.application.model_persistence.entity_model_bundle import EntityModelBundle
 from pdf_forensics.application.model_persistence.load_trained_models_use_case import (
     LoadTrainedModelsUseCase,
 )
@@ -49,28 +50,40 @@ def test_round_trip_predictions_match(tmp_path: Path) -> None:
     for classifier in entity_classifiers:
         classifier.fit(entity_feature_vectors, entity_labels)
 
-    output_path = tmp_path / "model_store.joblib"
-    SaveTrainedModelsUseCase().execute(detectors, models, output_path, entity_classifiers)
-
-    loaded_detectors, loaded_models, loaded_entity_classifiers = LoadTrainedModelsUseCase().execute(
-        output_path
+    bundle = EntityModelBundle(
+        detectors=detectors,
+        models=models,
+        genuine_count=15,
+        confirmed_fraud_count=15,
+        ml_ensemble_ready=True,
     )
+    output_path = tmp_path / "model_store.joblib"
+    SaveTrainedModelsUseCase().execute(entity_classifiers, {"ENTITY_A": bundle}, output_path)
 
-    assert {d.detector_id for d in loaded_detectors} == {d.detector_id for d in detectors}
-    assert {m.model_id for m in loaded_models} == {m.model_id for m in models}
+    loaded_entity_classifiers, per_entity = LoadTrainedModelsUseCase().execute(output_path)
+
     assert {c.classifier_id for c in loaded_entity_classifiers} == {
         c.classifier_id for c in entity_classifiers
     }
+    assert set(per_entity) == {"ENTITY_A"}
+    loaded_bundle = per_entity["ENTITY_A"]
+    assert loaded_bundle.genuine_count == 15
+    assert loaded_bundle.confirmed_fraud_count == 15
+    assert loaded_bundle.ml_ensemble_ready is True
+    assert {d.detector_id for d in loaded_bundle.detectors} == {d.detector_id for d in detectors}
+    assert {m.model_id for m in loaded_bundle.models} == {m.model_id for m in models}
 
     for original in detectors:
-        loaded_by_id = next(d for d in loaded_detectors if d.detector_id == original.detector_id)
+        loaded_by_id = next(
+            d for d in loaded_bundle.detectors if d.detector_id == original.detector_id
+        )
         before = original.score(OUTLIER_VECTOR)
         after = loaded_by_id.score(OUTLIER_VECTOR)
         assert after.score == pytest.approx(before.score)
         assert after.is_anomaly == before.is_anomaly
 
     for original in models:
-        loaded_by_id = next(m for m in loaded_models if m.model_id == original.model_id)
+        loaded_by_id = next(m for m in loaded_bundle.models if m.model_id == original.model_id)
         before = original.predict(INLIER_VECTOR)
         after = loaded_by_id.predict(INLIER_VECTOR)
         assert after.probability == pytest.approx(before.probability)
@@ -86,6 +99,22 @@ def test_round_trip_predictions_match(tmp_path: Path) -> None:
         assert after.predicted_entity == before.predicted_entity
 
 
+def test_entity_with_no_fitted_models_round_trips_as_empty_tuples(tmp_path: Path) -> None:
+    entity_classifiers = default_entity_classifiers()
+    bundle = EntityModelBundle(
+        detectors=(), models=(), genuine_count=1, confirmed_fraud_count=0, ml_ensemble_ready=False
+    )
+    output_path = tmp_path / "model_store.joblib"
+    SaveTrainedModelsUseCase().execute(entity_classifiers, {"NEW_ENTITY": bundle}, output_path)
+
+    _, per_entity = LoadTrainedModelsUseCase().execute(output_path)
+
+    loaded_bundle = per_entity["NEW_ENTITY"]
+    assert loaded_bundle.detectors == ()
+    assert loaded_bundle.models == ()
+    assert loaded_bundle.ml_ensemble_ready is False
+
+
 def test_load_raises_for_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         LoadTrainedModelsUseCase().execute(tmp_path / "does_not_exist.joblib")
@@ -93,11 +122,11 @@ def test_load_raises_for_missing_file(tmp_path: Path) -> None:
 
 def test_load_raises_for_schema_mismatch(tmp_path: Path) -> None:
     path = tmp_path / "bad_store.joblib"
-    save_bundle(path, {"schema_version": "0.0.1", "detectors": {}, "models": {}})
+    save_bundle(path, {"schema_version": "0.0.1", "entity_classifiers": {}, "per_entity": {}})
 
     with pytest.raises(ValueError, match="schema_version"):
         LoadTrainedModelsUseCase().execute(path)
 
 
 def test_schema_version_constant_is_stable() -> None:
-    assert MODEL_STORE_SCHEMA_VERSION == "1.0.0"
+    assert MODEL_STORE_SCHEMA_VERSION == "2.0.0"

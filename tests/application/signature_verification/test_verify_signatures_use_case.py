@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 from io import BytesIO
 from pathlib import Path
@@ -18,6 +19,9 @@ from pdf_forensics.application.signature_verification.verify_signatures_use_case
     VerifySignaturesUseCase,
 )
 from pdf_forensics.domain.signature_verification.signature_coverage import SignatureCoverage
+from pdf_forensics.domain.signature_verification.signature_verification_report import (
+    SignatureVerificationReport,
+)
 
 _SIGNED_TEXT = b"Hello signed world"
 
@@ -106,3 +110,20 @@ def test_garbage_bytes_do_not_raise() -> None:
     report = VerifySignaturesUseCase().execute(b"this is not a pdf at all")
 
     assert len(report) == 0
+
+
+def test_valid_signature_found_when_called_from_a_running_event_loop(tmp_path: Path) -> None:
+    """pyHanko validates signatures with its own internal `asyncio.run()`,
+    which raises if a loop is already running (as it is inside a FastAPI
+    request handler). Regression test for that: the signature must still be
+    found and reported when this use case executes on the same thread as a
+    running event loop, not silently dropped."""
+    signed = _signed_pdf_bytes(tmp_path)
+
+    async def _verify_from_within_a_loop() -> SignatureVerificationReport:
+        return VerifySignaturesUseCase().execute(signed)
+
+    report = asyncio.run(_verify_from_within_a_loop())
+
+    assert len(report) == 1
+    assert report.results[0].digest_intact is True

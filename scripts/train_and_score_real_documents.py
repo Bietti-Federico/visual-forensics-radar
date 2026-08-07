@@ -1,10 +1,22 @@
 """
-Fits Anomaly Detection (Module 5) and ML Ensemble (Module 6) on a REAL
-benchmark run (real user-provided PDFs + realistic transformation variants,
-built by pdf-forensics-benchmark's `examples/build_real_documents_dataset.py`)
-instead of the throwaway synthetic grid `run_full_pipeline.py` uses, then
-scores every sample in that same run through the full Module 1-8 pipeline —
-plus an optional extra target file.
+R&D SANITY SCRIPT — superseded for production use by scripts/retrain.py +
+scripts/score_document.py (or the API's /retrain + /verify), which fit
+Anomaly Detection/ML Ensemble PER ENTITY from the real
+`training_corpus/genuine|confirmed_fraud/<entity>/` directory tree instead
+of pooling every entity's documents into one global fit. Fitting globally
+(what this script still does) was found to be actively misleading: it flags
+6/10 genuine reference documents as anomalous in-sample, because pooling
+structurally very different entities (ANSES/La Rioja/Jujuy) makes each look
+"anomalous" relative to the others. This script is kept only as a
+sanity check against `pdf-forensics-benchmark`'s synthetic/field-substituted
+variants, which the production training corpus deliberately no longer uses.
+
+Fits Anomaly Detection (Module 5) and ML Ensemble (Module 6), globally
+across entities, on a REAL benchmark run (real user-provided PDFs +
+realistic transformation variants, built by pdf-forensics-benchmark's
+`examples/build_real_documents_dataset.py`) instead of the throwaway
+synthetic grid `run_full_pipeline.py` uses, then scores every sample in that
+same run through the full pipeline — plus an optional extra target file.
 
 Usage:
     poetry run python scripts/train_and_score_real_documents.py <benchmark_output_dir> \
@@ -16,10 +28,9 @@ exercise every module end-to-end on real data, not enough to calibrate a
 production model. Genuinely real documents (and their direct transformations)
 are up-weighted relative to synthetic field-substituted variants — see
 scripts/_training_weights.py — but that's a mitigation, not a substitute for
-more real documents. Model persistence lives in
-`application/model_persistence/` (see scripts/train_and_save_models.py) —
-this script always refits from scratch, by design, so it stays a simple,
-self-contained sanity check.
+more real documents. This script always refits from scratch, by design, so
+it stays a simple, self-contained sanity check — it never touches the
+production `model_store.joblib`.
 """
 
 from __future__ import annotations
