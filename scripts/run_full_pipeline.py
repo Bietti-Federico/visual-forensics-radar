@@ -61,6 +61,9 @@ from pdf_forensics.application.rule_engine.evaluate_entity_aware_rules_use_case 
     EvaluateEntityAwareRulesUseCase,
 )
 from pdf_forensics.application.rule_engine.evaluate_rules_use_case import EvaluateRulesUseCase
+from pdf_forensics.application.signature_verification.verify_signatures_use_case import (
+    VerifySignaturesUseCase,
+)
 from pdf_forensics.domain.rules.rule_report import RuleEvaluationReport
 from pdf_forensics.plugins.anomaly_detection import default_detectors
 from pdf_forensics.plugins.entity_identification import default_entity_classifiers
@@ -158,6 +161,7 @@ def main() -> None:
 
     # --- Modules 2-6 ---
     feature_set = extract_features.execute(document)
+    signature_report = VerifySignaturesUseCase().execute(data)
     fingerprint = GenerateFingerprintUseCase().execute(document, feature_set)
     anomaly_report = DetectAnomaliesUseCase(detectors).execute(feature_set)
     ml_report = PredictUseCase(models).execute(feature_set)
@@ -179,7 +183,13 @@ def main() -> None:
 
     # --- Module 8: the final deliverable ---
     risk_report = GenerateRiskReportUseCase().execute(
-        feature_set, rule_report, anomaly_report, ml_report, shap_explanations, entity_report
+        feature_set,
+        rule_report,
+        anomaly_report,
+        ml_report,
+        shap_explanations,
+        entity_report,
+        signature_report,
     )
 
     print(f"Fingerprint: {fingerprint.to_dict()}")

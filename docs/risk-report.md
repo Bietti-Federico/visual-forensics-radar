@@ -10,22 +10,22 @@ packaged together with Module 7's `ExplanationReport` — matching the
 platform brief's own illustrative example, which shows the score and its
 reasons/SHAP top features together as one output.
 
-## One of the brief's seven inputs is still honestly unavailable
+## All seven of the brief's inputs are now represented
 
 The brief lists: Rule Engine, **Generator Confidence**, Anomaly Score, ML
 Probability, **Fingerprint Similarity**, Structural Confidence, Metadata
 Confidence.
 
-- **Generator Confidence** is now covered by `entity_consistency`, backed by
-  the Entity Identification module (`application/entity_identification/`) —
+- **Generator Confidence** is covered by `entity_consistency`, backed by the
+  Entity Identification module (`application/entity_identification/`) —
   see below.
-- **Fingerprint Similarity** still needs a reference corpus of known-good
-  fingerprints to compare against — Module 3 only computes *one* document's
-  fingerprint; no reference corpus/storage exists yet.
-
-`Fingerprint Similarity` is excluded from the formula, not weighted at zero
-silently. Weights are renormalized over the six genuinely available
-components.
+- **Fingerprint Similarity** is covered *in spirit, not literally* by
+  `signature_integrity`, backed by the Signature Verification module
+  (`application/signature_verification/`, `docs/signature-verification.md`)
+  — Module 3 still has no reference corpus of known-good fingerprints to
+  compare against, but a cryptographically verified embedded signature is a
+  much stronger per-document integrity signal than a similarity search
+  would have been anyway.
 
 ## `entity_consistency` (Entity Identification)
 
@@ -44,6 +44,13 @@ implemented is a genuine, narrower signal: "does this document's structure
 confidently resemble one of the real-world templates we've actually seen."
 See `docs/entity-identification.md`.
 
+## `signature_integrity` (Signature Verification)
+
+Validates any embedded PKCS#7 digital signature: does its cryptographic
+digest still match the signed bytes, is the signature itself valid, and
+does it cover the whole file. See `docs/signature-verification.md` for the
+full scoring table and why trust-chain validation is deliberately excluded.
+
 ## The weights are a documented starting point, not a calibrated model
 
 There's no labeled dataset large enough yet to empirically fit these weights
@@ -52,7 +59,7 @@ forward. `RiskWeights` is a constructor-injectable dataclass (defaults sum to
 1.0, validated) specifically so recalibration never requires touching this
 module's structure.
 
-## The six components
+## The seven components
 
 | Component | Formula | Why |
 |---|---|---|
@@ -62,6 +69,7 @@ module's structure.
 | `structural` | `min(1, anomaly_count_total / object_count * 10)` | A general anomaly-density signal, distinct from the specific patterns Rule Engine checks |
 | `metadata` | `1.0` if no `/Info` dict; else fraction of 6 metadata fields missing | Missing metadata correlates with scrubbing, same rationale as Module 4's `missing_info_dictionary` rule |
 | `entity_consistency` | `1 - mean(EntityPrediction.confidence)` | Low confidence in matching any known entity's structural template is itself a signal, narrower than a true claimed-vs-actual check (see above) |
+| `signature_integrity` | Worst-finding-wins across embedded signatures (`0.0` none/valid, `0.7` partial coverage, `0.9` invalid, `1.0` broken digest) | See `docs/signature-verification.md` |
 
 Final score: `round(clamp(Σ(score·weight), 0, 1) * 100)`.
 
@@ -73,7 +81,8 @@ from pdf_forensics.application.risk_report.generate_risk_report_use_case import 
 )
 
 risk_report = GenerateRiskReportUseCase().execute(
-    feature_set, rule_report, anomaly_report, ml_report, shap_explanations, entity_report
+    feature_set, rule_report, anomaly_report, ml_report, shap_explanations,
+    entity_report, signature_report,
 )
 print(f"Risk Score: {risk_report.risk_score}")
 for component in risk_report.components:

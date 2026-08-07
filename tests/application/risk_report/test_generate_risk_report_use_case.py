@@ -19,12 +19,34 @@ from pdf_forensics.domain.pdf.anomalies import AnomalySeverity
 from pdf_forensics.domain.risk.risk_weights import RiskWeights
 from pdf_forensics.domain.rules.rule_finding import RuleFinding
 from pdf_forensics.domain.rules.rule_report import RuleEvaluationReport
+from pdf_forensics.domain.signature_verification.signature_coverage import SignatureCoverage
+from pdf_forensics.domain.signature_verification.signature_verification_report import (
+    SignatureVerificationReport,
+)
+from pdf_forensics.domain.signature_verification.signature_verification_result import (
+    SignatureVerificationResult,
+)
 from tests.fixtures.feature_helpers import build_feature_set
 
 
 def _finding(severity: AnomalySeverity) -> RuleFinding:
     return RuleFinding(
         rule_id="test_rule", severity=severity, confidence=1.0, explanation="e", references=()
+    )
+
+
+def _signature_result(
+    digest_intact: bool = True,
+    cryptographically_valid: bool = True,
+    coverage: SignatureCoverage = SignatureCoverage.ENTIRE_FILE,
+) -> SignatureVerificationResult:
+    return SignatureVerificationResult(
+        field_name="Signature1",
+        digest_intact=digest_intact,
+        cryptographically_valid=cryptographically_valid,
+        coverage=coverage,
+        signer_subject="Test Signer",
+        signing_time=None,
     )
 
 
@@ -52,6 +74,7 @@ def test_all_zero_when_nothing_triggers() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     assert report.risk_score == 0
     assert {c.name: c.score for c in report.components} == {
@@ -61,6 +84,7 @@ def test_all_zero_when_nothing_triggers() -> None:
         "structural": 0.0,
         "metadata": 0.0,
         "entity_consistency": 0.0,
+        "signature_integrity": 0.0,
     }
 
 
@@ -73,10 +97,11 @@ def test_critical_findings_drive_rule_engine_component() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     rule_engine_component = next(c for c in report.components if c.name == "rule_engine")
     assert rule_engine_component.score == 0.9
-    assert report.risk_score == round(0.9 * 0.27 * 100)
+    assert report.risk_score == round(0.9 * 0.24 * 100)
 
 
 def test_noisy_or_saturates_but_never_exceeds_one() -> None:
@@ -90,6 +115,7 @@ def test_noisy_or_saturates_but_never_exceeds_one() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     rule_engine_component = next(c for c in report.components if c.name == "rule_engine")
     assert 0.999 < rule_engine_component.score < 1.0
@@ -109,6 +135,7 @@ def test_ml_probability_is_mean_of_predictions() -> None:
         ml_report,
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     ml_component = next(c for c in report.components if c.name == "ml_probability")
     assert ml_component.score == 0.5
@@ -128,6 +155,7 @@ def test_anomaly_detection_uses_is_anomaly_flag_only() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     anomaly_component = next(c for c in report.components if c.name == "anomaly_detection")
     assert anomaly_component.score == 0.7
@@ -141,6 +169,7 @@ def test_structural_score_zero_when_features_absent() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     structural_component = next(c for c in report.components if c.name == "structural")
     assert structural_component.score == 0.0
@@ -157,6 +186,7 @@ def test_structural_score_from_anomaly_density() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     structural_component = next(c for c in report.components if c.name == "structural")
     assert structural_component.score == pytest.approx(min(1.0, 2 / 10 * 10))
@@ -171,6 +201,7 @@ def test_metadata_score_is_one_when_no_info_dict() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     metadata_component = next(c for c in report.components if c.name == "metadata")
     assert metadata_component.score == 1.0
@@ -195,6 +226,7 @@ def test_metadata_score_is_fraction_missing() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     metadata_component = next(c for c in report.components if c.name == "metadata")
     assert metadata_component.score == 2 / 6
@@ -209,14 +241,16 @@ def test_custom_weights_change_final_score() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     custom_weights = RiskWeights(
-        rule_engine=0.8,
+        rule_engine=0.7,
         ml_probability=0.04,
         anomaly_detection=0.04,
         structural=0.04,
         metadata=0.04,
         entity_consistency=0.04,
+        signature_integrity=0.1,
     )
     custom_report = GenerateRiskReportUseCase(weights=custom_weights).execute(
         _clean_feature_set(),
@@ -225,6 +259,7 @@ def test_custom_weights_change_final_score() -> None:
         MlEnsembleReport(),
         [],
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     assert custom_report.risk_score > default_report.risk_score
 
@@ -247,9 +282,71 @@ def test_entity_consistency_score_is_one_minus_mean_confidence() -> None:
         MlEnsembleReport(),
         [],
         entity_report,
+        SignatureVerificationReport(),
     )
     entity_component = next(c for c in report.components if c.name == "entity_consistency")
     assert entity_component.score == pytest.approx(0.3)
+
+
+def test_signature_score_zero_when_no_signature_present() -> None:
+    report = GenerateRiskReportUseCase().execute(
+        _clean_feature_set(),
+        RuleEvaluationReport(),
+        AnomalyDetectionReport(),
+        MlEnsembleReport(),
+        [],
+        EntityIdentificationReport(),
+        SignatureVerificationReport(),
+    )
+    signature_component = next(c for c in report.components if c.name == "signature_integrity")
+    assert signature_component.score == 0.0
+
+
+def test_signature_score_is_max_when_digest_broken() -> None:
+    signature_report = SignatureVerificationReport(results=[_signature_result(digest_intact=False)])
+    report = GenerateRiskReportUseCase().execute(
+        _clean_feature_set(),
+        RuleEvaluationReport(),
+        AnomalyDetectionReport(),
+        MlEnsembleReport(),
+        [],
+        EntityIdentificationReport(),
+        signature_report,
+    )
+    signature_component = next(c for c in report.components if c.name == "signature_integrity")
+    assert signature_component.score == 1.0
+
+
+def test_signature_score_is_moderate_for_partial_coverage() -> None:
+    signature_report = SignatureVerificationReport(
+        results=[_signature_result(coverage=SignatureCoverage.PARTIAL)]
+    )
+    report = GenerateRiskReportUseCase().execute(
+        _clean_feature_set(),
+        RuleEvaluationReport(),
+        AnomalyDetectionReport(),
+        MlEnsembleReport(),
+        [],
+        EntityIdentificationReport(),
+        signature_report,
+    )
+    signature_component = next(c for c in report.components if c.name == "signature_integrity")
+    assert signature_component.score == 0.7
+
+
+def test_signature_score_zero_for_fully_valid_signature() -> None:
+    signature_report = SignatureVerificationReport(results=[_signature_result()])
+    report = GenerateRiskReportUseCase().execute(
+        _clean_feature_set(),
+        RuleEvaluationReport(),
+        AnomalyDetectionReport(),
+        MlEnsembleReport(),
+        [],
+        EntityIdentificationReport(),
+        signature_report,
+    )
+    signature_component = next(c for c in report.components if c.name == "signature_integrity")
+    assert signature_component.score == 0.0
 
 
 def test_embedded_explanation_matches_standalone_generation() -> None:
@@ -273,6 +370,7 @@ def test_embedded_explanation_matches_standalone_generation() -> None:
         ml_report,
         shap_explanations,
         EntityIdentificationReport(),
+        SignatureVerificationReport(),
     )
     standalone_explanation = GenerateExplanationUseCase().execute(
         rule_report, anomaly_report, ml_report, shap_explanations

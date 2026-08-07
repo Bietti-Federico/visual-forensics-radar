@@ -42,6 +42,9 @@ from pdf_forensics.application.rule_engine.evaluate_entity_aware_rules_use_case 
     EvaluateEntityAwareRulesUseCase,
 )
 from pdf_forensics.application.rule_engine.evaluate_rules_use_case import EvaluateRulesUseCase
+from pdf_forensics.application.signature_verification.verify_signatures_use_case import (
+    VerifySignaturesUseCase,
+)
 from pdf_forensics.domain.rules.rule_report import RuleEvaluationReport
 from pdf_forensics.plugins.features import default_feature_extractors
 from pdf_forensics.plugins.rules import default_entity_aware_rules, default_rules
@@ -60,7 +63,8 @@ def main() -> None:
     parse_pdf = ParsePdfUseCase()
     extract_features = FeatureExtractionUseCase(default_feature_extractors())
 
-    document = parse_pdf.execute(target_pdf.read_bytes())
+    pdf_bytes = target_pdf.read_bytes()
+    document = parse_pdf.execute(pdf_bytes)
     feature_set = extract_features.execute(document)
     fingerprint = GenerateFingerprintUseCase().execute(document, feature_set)
 
@@ -68,6 +72,7 @@ def main() -> None:
     ml_report = PredictUseCase(models).execute(feature_set)
     shap_explanations = ExplainPredictionUseCase(models).execute(feature_set)
     entity_report = IdentifyEntityUseCase(entity_classifiers).execute(feature_set)
+    signature_report = VerifySignaturesUseCase().execute(pdf_bytes)
 
     plain_rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
     entity_aware_rule_report = EvaluateEntityAwareRulesUseCase(
@@ -81,7 +86,13 @@ def main() -> None:
         rule_report, anomaly_report, ml_report, shap_explanations
     )
     risk_report = GenerateRiskReportUseCase().execute(
-        feature_set, rule_report, anomaly_report, ml_report, shap_explanations, entity_report
+        feature_set,
+        rule_report,
+        anomaly_report,
+        ml_report,
+        shap_explanations,
+        entity_report,
+        signature_report,
     )
 
     print(f"Fingerprint: {fingerprint.to_dict()}")
@@ -91,6 +102,16 @@ def main() -> None:
         print(
             f"  [{prediction.classifier_id}] {prediction.predicted_entity} "
             f"(confidence={prediction.confidence:.0%}) — {prediction.probabilities}"
+        )
+    print()
+    print("Signature verification:")
+    if not signature_report:
+        print("  No embedded signature found.")
+    for result in signature_report:
+        print(
+            f"  [{result.field_name}] intact={result.digest_intact} "
+            f"valid={result.cryptographically_valid} coverage={result.coverage.value} "
+            f"signer={result.signer_subject!r} signed_at={result.signing_time}"
         )
     print()
     print(f"Risk Score: {risk_report.risk_score}/100")

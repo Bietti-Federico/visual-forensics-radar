@@ -1,4 +1,4 @@
-"""Weights for combining the six available risk components into one score.
+"""Weights for combining the seven available risk components into one score.
 
 Defaults are a documented starting point, not a calibrated model — there is
 no labeled dataset large enough yet to empirically fit these (that's exactly
@@ -6,14 +6,16 @@ what Training Data Ingestion → ML Ensemble is for, going forward). Kept as an
 explicit, constructor-injectable dataclass specifically so they can be
 recalibrated later without changing `GenerateRiskReportUseCase`'s structure.
 
-Six of the platform brief's seven weighted inputs are represented here.
+All seven of the platform brief's weighted inputs are represented here.
 `entity_consistency` (Entity Identification, `application/entity_identification/`)
 covers the brief's `Generator Confidence` — how confidently this document's
 structure/producer matches one of the known real-world templates it's been
-trained on. `Fingerprint Similarity` (needs a reference corpus of known-good
-fingerprints to compare against, which doesn't exist — Module 3 only
-computes one document's fingerprint) is still genuinely unavailable, not
-weighted at zero silently.
+trained on. `signature_integrity` (Signature Verification,
+`application/signature_verification/`) covers `Fingerprint Similarity` in
+spirit, not literally — Module 3 still has no reference corpus of known-good
+fingerprints to compare against, but a cryptographically verified embedded
+signature is a much stronger per-document integrity signal than a
+similarity search would have been anyway.
 """
 
 from __future__ import annotations
@@ -25,12 +27,13 @@ _WEIGHT_SUM_TOLERANCE = 1e-9
 
 @dataclass(frozen=True, slots=True)
 class RiskWeights:
-    rule_engine: float = 0.27
-    ml_probability: float = 0.27
-    anomaly_detection: float = 0.18
-    structural: float = 0.09
-    metadata: float = 0.09
+    rule_engine: float = 0.24
+    ml_probability: float = 0.24
+    anomaly_detection: float = 0.16
+    structural: float = 0.08
+    metadata: float = 0.08
     entity_consistency: float = 0.10
+    signature_integrity: float = 0.10
 
     def __post_init__(self) -> None:
         total = (
@@ -40,6 +43,7 @@ class RiskWeights:
             + self.structural
             + self.metadata
             + self.entity_consistency
+            + self.signature_integrity
         )
         if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
             raise ValueError(f"RiskWeights must sum to 1.0, got {total}.")

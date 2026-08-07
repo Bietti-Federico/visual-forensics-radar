@@ -1,11 +1,11 @@
-"""Combines Rule Engine, Anomaly Detection, ML Ensemble, Entity Identification, and
-structural/metadata signals into a single weighted 0-100 risk score, packaged
-with Module 7's ExplanationReport.
+"""Combines Rule Engine, Anomaly Detection, ML Ensemble, Entity Identification,
+Signature Verification, and structural/metadata signals into a single
+weighted 0-100 risk score, packaged with Module 7's ExplanationReport.
 
-Six of the platform brief's seven weighted inputs are represented —
-`Fingerprint Similarity` is still genuinely unavailable this iteration (see
-`domain/risk/risk_weights.py`'s docstring for why), excluded from the formula
-rather than faked at weight zero.
+All seven of the platform brief's weighted inputs are represented — see
+`domain/risk/risk_weights.py`'s docstring for how `entity_consistency` and
+`signature_integrity` map onto the brief's `Generator Confidence` and
+`Fingerprint Similarity`.
 
 The formulas below are a documented MVP starting point, not a calibrated
 model — there is no labeled dataset large enough yet to empirically fit
@@ -32,6 +32,10 @@ from pdf_forensics.domain.risk.risk_component_score import RiskComponentScore
 from pdf_forensics.domain.risk.risk_report import RiskReport
 from pdf_forensics.domain.risk.risk_weights import RiskWeights
 from pdf_forensics.domain.rules.rule_report import RuleEvaluationReport
+from pdf_forensics.domain.signature_verification.signature_coverage import SignatureCoverage
+from pdf_forensics.domain.signature_verification.signature_verification_report import (
+    SignatureVerificationReport,
+)
 
 _RULE_SEVERITY_BASE_PROBABILITY = {
     AnomalySeverity.CRITICAL: 0.9,
@@ -63,6 +67,7 @@ class GenerateRiskReportUseCase:
         ml_report: MlEnsembleReport,
         shap_explanations: Sequence[ShapExplanation],
         entity_report: EntityIdentificationReport,
+        signature_report: SignatureVerificationReport,
     ) -> RiskReport:
         explanation = self._explain.execute(
             rule_report, anomaly_report, ml_report, shap_explanations
@@ -98,6 +103,11 @@ class GenerateRiskReportUseCase:
                 name="entity_consistency",
                 score=self._entity_consistency_score(entity_report),
                 weight=self._weights.entity_consistency,
+            ),
+            RiskComponentScore(
+                name="signature_integrity",
+                score=self._signature_integrity_score(signature_report),
+                weight=self._weights.signature_integrity,
             ),
         )
 
@@ -166,3 +176,31 @@ class GenerateRiskReportUseCase:
         if not confidences:
             return 0.0
         return 1.0 - (sum(confidences) / len(confidences))
+
+    def _signature_integrity_score(self, signature_report: SignatureVerificationReport) -> float:
+        """
+        `0.0` when no signature is present at all — the absence of a
+        signature isn't itself suspicious (most documents this platform
+        handles have none); `entity_template_mismatch`
+        (`plugins/rules/entity_template_mismatch_rule.py`) already covers
+        "this entity's genuine documents always have one and this doesn't."
+
+        When a signature IS present, the worst finding across all of them
+        wins: a broken digest (content changed after signing) is worse than
+        a signature that doesn't cover the whole file (content appended
+        after signing), which is worse than a malformed signature blob that
+        still hashes correctly. Trust-chain validity is deliberately not
+        part of this score — see the domain result type's docstring.
+        """
+        if not signature_report.results:
+            return 0.0
+
+        score = 0.0
+        for result in signature_report:
+            if not result.digest_intact:
+                score = max(score, 1.0)
+            elif result.coverage is not SignatureCoverage.ENTIRE_FILE:
+                score = max(score, 0.7)
+            elif not result.cryptographically_valid:
+                score = max(score, 0.9)
+        return score

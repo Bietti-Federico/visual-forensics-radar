@@ -64,6 +64,9 @@ from pdf_forensics.application.rule_engine.evaluate_entity_aware_rules_use_case 
     EvaluateEntityAwareRulesUseCase,
 )
 from pdf_forensics.application.rule_engine.evaluate_rules_use_case import EvaluateRulesUseCase
+from pdf_forensics.application.signature_verification.verify_signatures_use_case import (
+    VerifySignaturesUseCase,
+)
 from pdf_forensics.application.training_data.build_training_dataset_use_case import (
     BuildTrainingDatasetUseCase,
 )
@@ -77,12 +80,13 @@ from pdf_forensics.plugins.rules import default_entity_aware_rules, default_rule
 
 
 def _print_risk_report(
-    label: str, feature_set: FeatureSet, detectors, models, entity_classifiers
+    label: str, pdf_bytes: bytes, feature_set: FeatureSet, detectors, models, entity_classifiers
 ) -> None:
     anomaly_report = DetectAnomaliesUseCase(detectors).execute(feature_set)
     ml_report = PredictUseCase(models).execute(feature_set)
     shap_explanations = ExplainPredictionUseCase(models).execute(feature_set)
     entity_report = IdentifyEntityUseCase(entity_classifiers).execute(feature_set)
+    signature_report = VerifySignaturesUseCase().execute(pdf_bytes)
 
     plain_rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
     entity_aware_rule_report = EvaluateEntityAwareRulesUseCase(
@@ -96,7 +100,13 @@ def _print_risk_report(
         rule_report, anomaly_report, ml_report, shap_explanations
     )
     risk_report = GenerateRiskReportUseCase().execute(
-        feature_set, rule_report, anomaly_report, ml_report, shap_explanations, entity_report
+        feature_set,
+        rule_report,
+        anomaly_report,
+        ml_report,
+        shap_explanations,
+        entity_report,
+        signature_report,
     )
 
     print(f"\n=== {label} ===")
@@ -104,6 +114,11 @@ def _print_risk_report(
         print(
             f"  entity[{prediction.classifier_id}]: {prediction.predicted_entity} "
             f"(confidence={prediction.confidence:.0%})"
+        )
+    for result in signature_report:
+        print(
+            f"  signature[{result.field_name}]: intact={result.digest_intact} "
+            f"valid={result.cryptographically_valid} coverage={result.coverage.value}"
         )
     print(f"Risk Score: {risk_report.risk_score}/100")
     for component in risk_report.components:
@@ -180,18 +195,30 @@ def main() -> None:
     # --- Score every sample from the training run itself ---
     for sample in dataset.samples:
         label = "original" if sample.source.is_original else sample.source.multiclass_label
+        sample_bytes = sample.source.path.read_bytes()
         _print_risk_report(
-            f"{sample.id} ({label})", sample.features, detectors, models, entity_classifiers
+            f"{sample.id} ({label})",
+            sample_bytes,
+            sample.features,
+            detectors,
+            models,
+            entity_classifiers,
         )
 
     # --- Score an optional extra target file, fully held out of training ---
     if target_pdf is not None:
-        document = parse_pdf.execute(target_pdf.read_bytes())
+        target_bytes = target_pdf.read_bytes()
+        document = parse_pdf.execute(target_bytes)
         feature_set = extract_features.execute(document)
         fingerprint = GenerateFingerprintUseCase().execute(document, feature_set)
         print(f"\nFingerprint ({target_pdf.name}): {fingerprint.to_dict()}")
         _print_risk_report(
-            f"TARGET: {target_pdf.name}", feature_set, detectors, models, entity_classifiers
+            f"TARGET: {target_pdf.name}",
+            target_bytes,
+            feature_set,
+            detectors,
+            models,
+            entity_classifiers,
         )
 
 

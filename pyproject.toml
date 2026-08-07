@@ -22,6 +22,12 @@ numba = "^0.60"
 # (application/model_persistence/). scikit-learn already depends on joblib
 # transitively; declared directly here since our own code imports it.
 joblib = "^1.4"
+# Validates embedded PDF digital signatures (application/signature_verification/) —
+# PKCS#7/CMS parsing and cryptographic verification is deliberately NOT
+# hand-rolled from scratch (unlike Module 1's own PDF object parser): this is
+# exactly the kind of security-sensitive parsing where using a well-tested,
+# actively maintained library is the responsible choice.
+pyhanko = "^0.36"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.10"
