@@ -63,11 +63,14 @@ of the two specific features above: at retrain time, for each entity, any
 and any key of a `FeatureType.DICT` histogram feature whose count is
 identical across every genuine sample, becomes a `LearnedInvariant` —
 gated by a minimum sample count (`TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY`
-in `application/model_training/retrain_models_use_case.py`) so "constant
-across 2-3 documents" isn't mistaken for a template. A brand-new entity
-added purely through `POST /training-data/genuine` gets its own invariants
-mined with zero code changes, the same way it already gets its own Anomaly
-Detection detectors.
+in `application/model_training/retrain_models_use_case.py`, currently `1`:
+a single confirmed-real document is trusted immediately rather than
+waiting for volume that may not exist yet, at the cost of more
+false-positive noise on that entity's first few genuine uploads until more
+documents rule out incidental, non-structural coincidences of that first
+sample). A brand-new entity added purely through `POST /training-data/genuine`
+gets its own invariants mined with zero code changes, the same way it
+already gets its own Anomaly Detection detectors.
 
 Both feature shapes (boolean flags, histogram key counts) are specific and
 verifiable enough to be their own finding (`entity_template_mismatch`,

@@ -52,10 +52,15 @@ ANOMALY_MIN_GENUINE_PER_ENTITY = 2
 #: Both thresholds must be met before an entity's ML Ensemble activates.
 ML_ENSEMBLE_MIN_GENUINE_PER_ENTITY = 5
 ML_ENSEMBLE_MIN_CONFIRMED_FRAUD_PER_ENTITY = 3
-#: "Constant across 2-3 documents" is a coincidence, not a template — this
-#: is deliberately higher than `ANOMALY_MIN_GENUINE_PER_ENTITY` since a
-#: learned invariant is a hard yes/no gate, not a statistical distance.
-TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY = 4
+#: Deliberately as low as it can go (1, not 0 — an entity with zero genuine
+#: documents obviously can't have invariants mined). A single confirmed-real
+#: document is trusted immediately rather than waiting for volume that may
+#: not exist yet — but with n=1, incidental features of that one document
+#: (not just genuinely structural ones) become "invariants" too, so expect
+#: elevated false-positive noise on this entity's next few genuine uploads
+#: until more documents accumulate and rule out coincidences. Raise this if
+#: that noise turns out to matter more than early coverage.
+TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY = 1
 
 
 @dataclass(frozen=True, slots=True)

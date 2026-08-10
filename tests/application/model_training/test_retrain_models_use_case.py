@@ -54,9 +54,10 @@ def test_entity_above_anomaly_threshold_gets_detectors(tmp_path: Path) -> None:
     assert len(per_entity["ANSES"].detectors) > 0
 
 
-def test_entity_below_invariant_threshold_gets_no_invariants(tmp_path: Path) -> None:
+def test_entity_with_zero_genuine_docs_gets_no_invariants(tmp_path: Path) -> None:
     corpus_dir = tmp_path / "corpus"
-    _write_docs(corpus_dir / "genuine" / "ANSES", count=3)
+    # Confirmed-fraud only, no genuine documents at all for this entity.
+    _write_docs(corpus_dir / "confirmed_fraud" / "ANSES", count=1)
 
     summary = RetrainModelsUseCase(tmp_path / "model.joblib").execute(corpus_dir)
 
@@ -67,9 +68,9 @@ def test_entity_below_invariant_threshold_gets_no_invariants(tmp_path: Path) -> 
     assert per_entity["ANSES"].invariants == ()
 
 
-def test_entity_above_invariant_threshold_gets_invariants(tmp_path: Path) -> None:
+def test_single_genuine_doc_is_enough_for_invariants(tmp_path: Path) -> None:
     corpus_dir = tmp_path / "corpus"
-    _write_docs(corpus_dir / "genuine" / "ANSES", count=4)
+    _write_docs(corpus_dir / "genuine" / "ANSES", count=1)
 
     summary = RetrainModelsUseCase(tmp_path / "model.joblib").execute(corpus_dir)
 

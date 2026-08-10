@@ -108,14 +108,21 @@ see `docs/entity-identification.md` for why that would just produce
 constant false positives once the corpus grows.
 
 Gated the same way as the other per-entity models, by its own minimum
-sample count:
+sample count — deliberately as low as it can go:
 
 ```python
-TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY = 4
+TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY = 1
 ```
 
-Below that, an entity has no learned invariants yet (`()`), same shape as
-"not enough data yet" for Anomaly Detection/ML Ensemble. At verify time,
+A single confirmed-real document is trusted immediately rather than
+waiting for volume that may not exist yet, at a known cost: with `n=1`,
+incidental features of that one document (not just genuinely structural
+ones) become "invariants" too, so expect elevated false-positive noise on
+that entity's first few genuine uploads until more documents rule out
+coincidences. Below the threshold (only possible for an entity with zero
+genuine documents, e.g. a confirmed-fraud-only entity), it has no learned
+invariants yet (`()`), same shape as "not enough data yet" for Anomaly
+Detection/ML Ensemble. At verify time,
 `CheckEntityInvariantsUseCase` compares the document against the predicted
 entity's learned invariants and produces the same `RuleFinding` shape (same
 `rule_id`, `entity_template_mismatch`) the old hand-written rule did, with
