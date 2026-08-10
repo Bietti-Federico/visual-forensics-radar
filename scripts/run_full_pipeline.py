@@ -57,19 +57,15 @@ from pdf_forensics.application.pdf_analysis.parse_pdf_use_case import ParsePdfUs
 from pdf_forensics.application.risk_report.generate_risk_report_use_case import (
     GenerateRiskReportUseCase,
 )
-from pdf_forensics.application.rule_engine.evaluate_entity_aware_rules_use_case import (
-    EvaluateEntityAwareRulesUseCase,
-)
 from pdf_forensics.application.rule_engine.evaluate_rules_use_case import EvaluateRulesUseCase
 from pdf_forensics.application.signature_verification.verify_signatures_use_case import (
     VerifySignaturesUseCase,
 )
-from pdf_forensics.domain.rules.rule_report import RuleEvaluationReport
 from pdf_forensics.plugins.anomaly_detection import default_detectors
 from pdf_forensics.plugins.entity_identification import default_entity_classifiers
 from pdf_forensics.plugins.features import default_feature_extractors
 from pdf_forensics.plugins.ml_ensemble import default_models
-from pdf_forensics.plugins.rules import default_entity_aware_rules, default_rules
+from pdf_forensics.plugins.rules import default_rules
 
 
 def _synthetic_pdf_bytes() -> bytes:
@@ -168,13 +164,10 @@ def main() -> None:
     shap_explanations = ExplainPredictionUseCase(models).execute(feature_set)
     entity_report = IdentifyEntityUseCase(entity_classifiers).execute(feature_set)
 
-    plain_rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
-    entity_aware_rule_report = EvaluateEntityAwareRulesUseCase(
-        default_entity_aware_rules()
-    ).execute(feature_set, entity_report)
-    rule_report = RuleEvaluationReport(
-        findings=list(plain_rule_report) + list(entity_aware_rule_report)
-    )
+    # No per-entity learned invariants here — this demo's reference batch is
+    # synthetic and single-label (see module docstring), not real per-entity
+    # training data (see `application/entity_invariants/` for that).
+    rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
 
     # --- Module 7 (shown standalone, also embedded in Module 8's output below) ---
     explanation = GenerateExplanationUseCase().execute(

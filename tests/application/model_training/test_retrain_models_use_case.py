@@ -54,6 +54,42 @@ def test_entity_above_anomaly_threshold_gets_detectors(tmp_path: Path) -> None:
     assert len(per_entity["ANSES"].detectors) > 0
 
 
+def test_entity_below_invariant_threshold_gets_no_invariants(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    _write_docs(corpus_dir / "genuine" / "ANSES", count=3)
+
+    summary = RetrainModelsUseCase(tmp_path / "model.joblib").execute(corpus_dir)
+
+    entity_summary = next(s for s in summary.per_entity if s.entity == "ANSES")
+    assert entity_summary.invariant_count == 0
+
+    _, per_entity = LoadTrainedModelsUseCase().execute(tmp_path / "model.joblib")
+    assert per_entity["ANSES"].invariants == ()
+
+
+def test_entity_above_invariant_threshold_gets_invariants(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    _write_docs(corpus_dir / "genuine" / "ANSES", count=4)
+
+    summary = RetrainModelsUseCase(tmp_path / "model.joblib").execute(corpus_dir)
+
+    entity_summary = next(s for s in summary.per_entity if s.entity == "ANSES")
+    assert entity_summary.invariant_count > 0
+
+    _, per_entity = LoadTrainedModelsUseCase().execute(tmp_path / "model.joblib")
+    assert len(per_entity["ANSES"].invariants) > 0
+
+
+def test_new_entity_gets_invariants_mined_with_no_code_changes(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    _write_docs(corpus_dir / "genuine" / "BRAND_NEW_ENTITY", count=4)
+
+    summary = RetrainModelsUseCase(tmp_path / "model.joblib").execute(corpus_dir)
+
+    entity_summary = next(s for s in summary.per_entity if s.entity == "BRAND_NEW_ENTITY")
+    assert entity_summary.invariant_count > 0
+
+
 def test_ml_ensemble_activates_only_when_both_thresholds_met(tmp_path: Path) -> None:
     corpus_dir = tmp_path / "corpus"
     _write_docs(corpus_dir / "genuine" / "ANSES", count=6)

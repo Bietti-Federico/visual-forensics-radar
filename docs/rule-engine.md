@@ -34,22 +34,28 @@ of this abstraction, not something to engineer around.
 **Explicitly deferred**, same pattern as prior modules: font inconsistencies,
 XMP mismatch, linearization anomalies (all need capabilities not yet built).
 
-## An 8th rule, added once Entity Identification existed: `entity_template_mismatch`
+## An 8th finding, no longer a rule-plugin: `entity_template_mismatch`
 
-`plugins/rules/entity_template_mismatch_rule.py`, wired via a *separate*
-`default_entity_aware_rules()` (not `default_rules()`) because it needs an
-`EntityIdentificationReport`, not just a `FeatureSet` — see
-`application/rule_engine/entity_aware_ports.py` for why that's a distinct,
-narrower `Protocol` rather than a breaking change to `RulePlugin` itself.
-Flags a document confidently identified as a known entity (ANSES / La Rioja
-/ Jujuy) whose structure contradicts that entity's known invariants
-(`catalog.has_acroform`, embedded JPEG count) — see
-`docs/entity-identification.md`.
+This used to be `plugins/rules/entity_template_mismatch_rule.py`, an
+`EntityAwareRulePlugin` checking a hand-written, hand-maintained dict of
+per-entity structural invariants (found by a developer manually diffing a
+handful of real documents). That's retired: the same signal is now **mined
+automatically per entity** at retrain time from whatever's in the training
+corpus — `application/entity_invariants/fit_entity_invariants_use_case.py`
+— rather than requiring a code change every time a new entity is added
+through the training frontend. See `docs/entity-identification.md` for what
+gets mined and why.
 
-Callers run both use cases and merge their `RuleEvaluationReport`s (plain
-list concatenation — the type has no notion of "which use case produced
-this finding") before handing the result to Explainability/Risk Report,
-which need no changes to consume entity-aware findings.
+Because the fitted invariants are per-entity state (persisted in
+`EntityModelBundle`, alongside Anomaly Detection's detectors), this check
+isn't wired through `default_rules()`/a `RulePlugin` — those are stateless,
+constructed fresh per document. It's invoked directly from
+`ScoreDocumentUseCase`
+(`application/entity_invariants/check_entity_invariants_use_case.py`),
+the same way Anomaly Detection and ML Ensemble are, and its result is
+folded into the same `RuleEvaluationReport` the plain rules produce (same
+`rule_id`, `entity_template_mismatch`, same `RuleFinding` shape) — nothing
+downstream (Explainability, Risk Report) needed to change.
 
 ## A rule never guesses
 

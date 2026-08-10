@@ -9,6 +9,7 @@ from pdf_forensics.application.feature_extraction.extract_features_use_case impo
 )
 from pdf_forensics.application.ml_ensemble.train_models_use_case import TrainModelsUseCase
 from pdf_forensics.application.model_persistence.entity_model_bundle import EntityModelBundle
+from pdf_forensics.domain.entity_invariants.learned_invariant import LearnedInvariant
 from pdf_forensics.infrastructure.parsing.document_parser import PdfDocumentParser
 from pdf_forensics.plugins.entity_identification import default_entity_classifiers
 from pdf_forensics.plugins.features import default_feature_extractors
@@ -57,6 +58,7 @@ def test_full_weights_used_when_entity_ml_ensemble_ready() -> None:
     bundle = EntityModelBundle(
         detectors=(),
         models=models,
+        invariants=(),
         genuine_count=5,
         confirmed_fraud_count=3,
         ml_ensemble_ready=True,
@@ -71,7 +73,12 @@ def test_full_weights_used_when_entity_ml_ensemble_ready() -> None:
 
 def test_reduced_weights_used_when_entity_ml_ensemble_not_ready() -> None:
     bundle = EntityModelBundle(
-        detectors=(), models=(), genuine_count=1, confirmed_fraud_count=0, ml_ensemble_ready=False
+        detectors=(),
+        models=(),
+        invariants=(),
+        genuine_count=1,
+        confirmed_fraud_count=0,
+        ml_ensemble_ready=False,
     )
     use_case = ScoreDocumentUseCase(_trained_entity_classifiers(), {"TEST_ENTITY": bundle})
 
@@ -91,9 +98,32 @@ def test_no_entity_classifiers_still_scores_without_crashing() -> None:
     assert result.risk_report.risk_score >= 0
 
 
+def test_learned_invariant_violation_surfaces_as_rule_finding() -> None:
+    # None of these test documents have an /AcroForm entry, so an invariant
+    # claiming they always should is guaranteed to be violated.
+    bundle = EntityModelBundle(
+        detectors=(),
+        models=(),
+        invariants=(LearnedInvariant("catalog.has_acroform", True),),
+        genuine_count=6,
+        confirmed_fraud_count=0,
+        ml_ensemble_ready=False,
+    )
+    use_case = ScoreDocumentUseCase(_trained_entity_classifiers(), {"TEST_ENTITY": bundle})
+
+    result = use_case.execute(_document("Test Producer", 50).build())
+
+    assert any("catalog.has_acroform" in reason for reason in result.explanation.reasons)
+
+
 def test_unrecognized_entity_falls_back_to_empty_bundle() -> None:
     bundle = EntityModelBundle(
-        detectors=(), models=(), genuine_count=5, confirmed_fraud_count=5, ml_ensemble_ready=True
+        detectors=(),
+        models=(),
+        invariants=(),
+        genuine_count=5,
+        confirmed_fraud_count=5,
+        ml_ensemble_ready=True,
     )
     # Bundle exists only for a DIFFERENT entity than what gets predicted.
     use_case = ScoreDocumentUseCase(_trained_entity_classifiers(), {"SOME_OTHER_ENTITY": bundle})

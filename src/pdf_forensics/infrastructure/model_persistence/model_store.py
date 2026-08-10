@@ -24,9 +24,11 @@ from typing import Any
 import joblib
 
 #: 2.0.0: switched from one global detector/model set to a per-entity bundle
-#: (`application/model_persistence/entity_model_bundle.py`) — an old 1.0.0
-#: store is incompatible on purpose, not silently misread.
-MODEL_STORE_SCHEMA_VERSION = "2.0.0"
+#: (`application/model_persistence/entity_model_bundle.py`).
+#: 3.0.0: `EntityModelBundle` gained `invariants` (auto-mined per-entity
+#: template invariants, replacing the hand-written `entity_template_mismatch`
+#: rule). Both bumps are incompatible on purpose, not silently misread.
+MODEL_STORE_SCHEMA_VERSION = "3.0.0"
 
 
 def save_bundle(path: str | Path, bundle: dict[str, Any]) -> None:

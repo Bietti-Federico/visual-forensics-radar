@@ -173,6 +173,7 @@ def retrain(request: Request) -> dict[str, Any]:
                 "genuine_count": entity_summary.genuine_count,
                 "confirmed_fraud_count": entity_summary.confirmed_fraud_count,
                 "anomaly_detection_fitted": entity_summary.anomaly_detection_fitted,
+                "invariant_count": entity_summary.invariant_count,
                 "ml_ensemble_ready": entity_summary.ml_ensemble_ready,
             }
             for entity_summary in summary.per_entity

@@ -9,6 +9,7 @@ from pdf_forensics.application.model_persistence.load_trained_models_use_case im
 from pdf_forensics.application.model_persistence.save_trained_models_use_case import (
     SaveTrainedModelsUseCase,
 )
+from pdf_forensics.domain.entity_invariants.learned_invariant import LearnedInvariant
 from pdf_forensics.infrastructure.model_persistence.model_store import (
     MODEL_STORE_SCHEMA_VERSION,
     save_bundle,
@@ -50,9 +51,11 @@ def test_round_trip_predictions_match(tmp_path: Path) -> None:
     for classifier in entity_classifiers:
         classifier.fit(entity_feature_vectors, entity_labels)
 
+    invariants = (LearnedInvariant("catalog.has_acroform", True),)
     bundle = EntityModelBundle(
         detectors=detectors,
         models=models,
+        invariants=invariants,
         genuine_count=15,
         confirmed_fraud_count=15,
         ml_ensemble_ready=True,
@@ -70,6 +73,7 @@ def test_round_trip_predictions_match(tmp_path: Path) -> None:
     assert loaded_bundle.genuine_count == 15
     assert loaded_bundle.confirmed_fraud_count == 15
     assert loaded_bundle.ml_ensemble_ready is True
+    assert loaded_bundle.invariants == invariants
     assert {d.detector_id for d in loaded_bundle.detectors} == {d.detector_id for d in detectors}
     assert {m.model_id for m in loaded_bundle.models} == {m.model_id for m in models}
 
@@ -102,7 +106,12 @@ def test_round_trip_predictions_match(tmp_path: Path) -> None:
 def test_entity_with_no_fitted_models_round_trips_as_empty_tuples(tmp_path: Path) -> None:
     entity_classifiers = default_entity_classifiers()
     bundle = EntityModelBundle(
-        detectors=(), models=(), genuine_count=1, confirmed_fraud_count=0, ml_ensemble_ready=False
+        detectors=(),
+        models=(),
+        invariants=(),
+        genuine_count=1,
+        confirmed_fraud_count=0,
+        ml_ensemble_ready=False,
     )
     output_path = tmp_path / "model_store.joblib"
     SaveTrainedModelsUseCase().execute(entity_classifiers, {"NEW_ENTITY": bundle}, output_path)
@@ -112,6 +121,7 @@ def test_entity_with_no_fitted_models_round_trips_as_empty_tuples(tmp_path: Path
     loaded_bundle = per_entity["NEW_ENTITY"]
     assert loaded_bundle.detectors == ()
     assert loaded_bundle.models == ()
+    assert loaded_bundle.invariants == ()
     assert loaded_bundle.ml_ensemble_ready is False
 
 
@@ -129,4 +139,4 @@ def test_load_raises_for_schema_mismatch(tmp_path: Path) -> None:
 
 
 def test_schema_version_constant_is_stable() -> None:
-    assert MODEL_STORE_SCHEMA_VERSION == "2.0.0"
+    assert MODEL_STORE_SCHEMA_VERSION == "3.0.0"

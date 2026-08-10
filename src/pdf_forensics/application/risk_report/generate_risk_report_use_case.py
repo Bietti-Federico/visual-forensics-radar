@@ -182,8 +182,9 @@ class GenerateRiskReportUseCase:
         `0.0` when no signature is present at all — the absence of a
         signature isn't itself suspicious (most documents this platform
         handles have none); `entity_template_mismatch`
-        (`plugins/rules/entity_template_mismatch_rule.py`) already covers
-        "this entity's genuine documents always have one and this doesn't."
+        (`application/entity_invariants/check_entity_invariants_use_case.py`)
+        already covers "this entity's genuine documents always have one and
+        this doesn't."
 
         When a signature IS present, the worst finding across all of them
         wins: a broken digest (content changed after signing) is worse than

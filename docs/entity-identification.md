@@ -31,11 +31,13 @@ in ANSES's case, an *identical* `structure_hash`/`page_tree_hash` (Module
 This is exactly the kind of pattern a classifier can learn cheaply and
 reliably, even from a handful of real documents per entity.
 
-## More invariants, found by comparing real documents across entities
+## More invariants, now mined automatically instead of hand-written
 
-Restricting the comparison to *only* the untouched real documents (not their
-transformations, and not the synthetic field-substituted variants — see
-below for why that separation matters) surfaced two perfect per-entity
+The first version of this signal was found by hand: comparing real
+documents from the 3 entities above (only the untouched originals — not
+their transformations, and not synthetic field-substituted variants, whose
+different low-level byte structure from PyMuPDF's resave makes them
+misleading for this specific comparison) turned up two perfect per-entity
 invariants:
 
 | Entity | `catalog.has_acroform` | Embedded JPEGs (`streams.filter_histogram["DCTDecode"]`) |
@@ -52,21 +54,38 @@ entity's fixed letterhead/seal artwork; note ANSES's 4 real samples were all
 at all beyond file size (a few KB, from different names/amounts) and dates
 — an unusually rigid template even by these entities' standards.
 
-Both invariants are specific and verifiable enough to be their own Rule
-Engine rule (`entity_template_mismatch`, `docs/rule-engine.md`) rather than
-folded into the confidence-only `entity_consistency` score — a document
-identified as ANSES without an AcroForm, or with an embedded JPEG ANSES
-never uses, is a concrete, named contradiction, not just "low confidence."
+Requiring a developer to open source code and hand-add a dict entry every
+time a new entity's documents show up doesn't scale with a training
+frontend anyone can upload to. `application/entity_invariants/
+fit_entity_invariants_use_case.py` generalizes exactly this pattern instead
+of the two specific features above: at retrain time, for each entity, any
+`FeatureType.BOOLEAN` feature that's identical across every genuine sample,
+and any key of a `FeatureType.DICT` histogram feature whose count is
+identical across every genuine sample, becomes a `LearnedInvariant` —
+gated by a minimum sample count (`TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY`
+in `application/model_training/retrain_models_use_case.py`) so "constant
+across 2-3 documents" isn't mistaken for a template. A brand-new entity
+added purely through `POST /training-data/genuine` gets its own invariants
+mined with zero code changes, the same way it already gets its own Anomaly
+Detection detectors.
 
-Numeric structural features (`general.object_count`, `xref.in_use_entry_count`)
-did **not** turn out to be clean per-entity invariants when the training set
-also includes synthetic field-substituted variants — they split into two
-disjoint clusters per entity: the handful of untouched real documents, and
-the variants (`pdf-forensics-benchmark`'s `FieldSubstitutionGenerator`),
-which get a different low-level byte structure from PyMuPDF's resave (a
-known, documented limitation of that generator). More untouched real
-documents per entity, not more synthetic variants, is what would make these
-usable as "expected envelope" checks too.
+Both feature shapes (boolean flags, histogram key counts) are specific and
+verifiable enough to be their own finding (`entity_template_mismatch`,
+`docs/rule-engine.md`) rather than folded into the confidence-only
+`entity_consistency` score — a document identified as ANSES without an
+AcroForm, or with an embedded JPEG ANSES never uses, is a concrete, named
+contradiction, not just "low confidence."
+
+Continuous/scalar features (`general.object_count`, `general.file_size_bytes`,
+`xref.in_use_entry_count`, ...) are deliberately excluded from mining, not
+just historically inconvenient: they vary with a document's genuine content,
+so a coincidental match in a small fitting batch would turn into constant
+false positives on the very next legitimate document once the corpus grows.
+This is why the numeric features above never made good hand-written
+invariants either, once synthetic field-substituted variants (which get a
+different low-level byte structure from PyMuPDF's resave) were mixed into
+the comparison — the same instability an automated miner would hit if it
+weren't scoped to boolean/histogram features specifically.
 
 ## What this is NOT
 

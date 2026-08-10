@@ -83,26 +83,61 @@ replaces the CSV-manifest approach in `docs/training-data-ingestion.md`,
 which stays as-is for R&D work against the benchmark project's synthetic
 output — the two flows are independent and read different directories.
 
-One manual step is **not** automated by adding a folder: Entity
-Identification and Anomaly Detection/ML Ensemble need no code changes for
-a new entity, but `entity_template_mismatch`
-(`plugins/rules/entity_template_mismatch_rule.py`) still needs someone to
-look at the new entity's genuine documents and hand-add its structural
-invariants to `_ENTITY_TEMPLATE_INVARIANTS`.
+Adding a folder needs **zero** code changes for Entity Identification,
+Anomaly Detection, ML Ensemble, or the template-invariant check below —
+every one of them is fitted per entity from whatever's on disk. The one
+thing that stays a manual, hand-authored step for a genuinely new kind of
+check is adding a brand-new *rule* to `default_rules()`
+(`plugins/rules/__init__.py`) — a structural assertion nobody has
+expressed as a feature yet. Per-entity invariants over existing features
+are not that case; see the next section.
 
-## Model persistence: schema v2.0.0
+## Auto-learned per-entity template invariants
+
+The `entity_template_mismatch` finding used to be a hand-written,
+hand-maintained dict of "this entity's genuine documents always have
+X" facts (`_ENTITY_TEMPLATE_INVARIANTS`) — a developer had to inspect a new
+entity's documents and edit source code before it contributed anything for
+that entity. It's now mined automatically at retrain time, per entity, by
+`application/entity_invariants/fit_entity_invariants_use_case.py`: any
+boolean feature, or any key of a dict-valued histogram feature (e.g.
+`streams.filter_histogram`), whose value is identical across every genuine
+document of that entity becomes a `LearnedInvariant`. Continuous/scalar
+features (byte counts, object counts, ...) are deliberately never mined —
+see `docs/entity-identification.md` for why that would just produce
+constant false positives once the corpus grows.
+
+Gated the same way as the other per-entity models, by its own minimum
+sample count:
+
+```python
+TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY = 4
+```
+
+Below that, an entity has no learned invariants yet (`()`), same shape as
+"not enough data yet" for Anomaly Detection/ML Ensemble. At verify time,
+`CheckEntityInvariantsUseCase` compares the document against the predicted
+entity's learned invariants and produces the same `RuleFinding` shape (same
+`rule_id`, `entity_template_mismatch`) the old hand-written rule did, with
+an explanation generated from the actual/expected values instead of
+hand-written prose. `/retrain`'s response and the frontend surface
+`invariant_count` per entity, the same way they already surface
+`anomaly_detection_fitted`.
+
+## Model persistence: schema v3.0.0
 
 `SaveTrainedModelsUseCase`/`LoadTrainedModelsUseCase` changed shape from a
-flat global bundle to per-entity:
+flat global bundle to per-entity, then gained the invariants field above:
 
 ```python
 {
-  "schema_version": "2.0.0",
+  "schema_version": "3.0.0",
   "entity_classifiers": {...},   # one global classifier, unchanged (Module 9)
   "per_entity": {
     "ANSES": {
       "detectors": {...} | (),   # () if genuine_count < ANOMALY_MIN_GENUINE_PER_ENTITY
       "models": {...} | (),      # () if not ml_ensemble_ready
+      "invariants": (...) | (),  # () if genuine_count < TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY
       "genuine_count": 4,
       "confirmed_fraud_count": 1,
       "ml_ensemble_ready": False,
@@ -112,8 +147,9 @@ flat global bundle to per-entity:
 }
 ```
 
-This is a breaking change from schema `1.0.0` — there is no migration path
-for old bundles; retrain from the corpus to produce a v2 bundle.
+Each schema bump (`1.0.0` → `2.0.0`: per-entity bundles; `2.0.0` → `3.0.0`:
+added `invariants`) is a breaking change with no migration path for old
+bundles; retrain from the corpus to produce a current one.
 
 ## `ScoreDocumentUseCase`: one shared scoring path
 
@@ -125,12 +161,13 @@ and an already-loaded `(entity_classifiers, per_entity)` bundle:
 
 1. Parse + extract features + fingerprint (Modules 1-3).
 2. `IdentifyEntityUseCase` → top-predicted entity.
-3. Look up that entity's `detectors`/`models`/`ml_ensemble_ready` from
-   `per_entity`. An unrecognized entity (no bundle, e.g. nothing trained
-   yet) scores with empty Anomaly Detection and ML Ensemble reports —
-   the same as "nothing flagged," not an error.
-4. Rule Engine (plain + entity-aware) and Signature Verification
-   (Module 10), unchanged.
+3. Look up that entity's `detectors`/`models`/`invariants`/`ml_ensemble_ready`
+   from `per_entity`. An unrecognized entity (no bundle, e.g. nothing
+   trained yet) scores with empty Anomaly Detection, ML Ensemble, and
+   invariant-check results — the same as "nothing flagged," not an error.
+4. Rule Engine over the plain `FeatureSet`, plus
+   `CheckEntityInvariantsUseCase` against that entity's learned invariants
+   (see below), plus Signature Verification (Module 10).
 5. Picks `RiskWeights()` or `RiskWeights().without_ml_probability()`
    per the entity's `ml_ensemble_ready` flag.
 

@@ -22,6 +22,9 @@ from pdf_forensics.application.entity_identification.identify_entity_use_case im
     IdentifyEntityUseCase,
 )
 from pdf_forensics.application.entity_identification.ports import EntityClassifierPlugin
+from pdf_forensics.application.entity_invariants.check_entity_invariants_use_case import (
+    CheckEntityInvariantsUseCase,
+)
 from pdf_forensics.application.explainability.generate_explanation_use_case import (
     GenerateExplanationUseCase,
 )
@@ -40,9 +43,6 @@ from pdf_forensics.application.pdf_analysis.parse_pdf_use_case import ParsePdfUs
 from pdf_forensics.application.risk_report.generate_risk_report_use_case import (
     GenerateRiskReportUseCase,
 )
-from pdf_forensics.application.rule_engine.evaluate_entity_aware_rules_use_case import (
-    EvaluateEntityAwareRulesUseCase,
-)
 from pdf_forensics.application.rule_engine.evaluate_rules_use_case import EvaluateRulesUseCase
 from pdf_forensics.application.signature_verification.verify_signatures_use_case import (
     VerifySignaturesUseCase,
@@ -59,7 +59,7 @@ from pdf_forensics.domain.signature_verification.signature_verification_report i
     SignatureVerificationReport,
 )
 from pdf_forensics.plugins.features import default_feature_extractors
-from pdf_forensics.plugins.rules import default_entity_aware_rules, default_rules
+from pdf_forensics.plugins.rules import default_rules
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +99,7 @@ class ScoreDocumentUseCase:
         )
         detectors = bundle.detectors if bundle is not None else ()
         models = bundle.models if bundle is not None else ()
+        invariants = bundle.invariants if bundle is not None else ()
         ml_ensemble_ready = bundle.ml_ensemble_ready if bundle is not None else False
 
         anomaly_report = DetectAnomaliesUseCase(detectors).execute(feature_set)
@@ -107,11 +108,11 @@ class ScoreDocumentUseCase:
         signature_report = VerifySignaturesUseCase().execute(pdf_bytes)
 
         plain_rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
-        entity_aware_rule_report = EvaluateEntityAwareRulesUseCase(
-            default_entity_aware_rules()
-        ).execute(feature_set, entity_report)
+        invariant_finding = CheckEntityInvariantsUseCase(invariants).execute(
+            feature_set, entity_report
+        )
         rule_report = RuleEvaluationReport(
-            findings=list(plain_rule_report) + list(entity_aware_rule_report)
+            findings=list(plain_rule_report) + ([invariant_finding] if invariant_finding else [])
         )
 
         weights = RiskWeights() if ml_ensemble_ready else RiskWeights().without_ml_probability()

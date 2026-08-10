@@ -23,6 +23,9 @@ from pdf_forensics.application.entity_identification.ports import EntityClassifi
 from pdf_forensics.application.entity_identification.train_entity_classifier_use_case import (
     TrainEntityClassifierUseCase,
 )
+from pdf_forensics.application.entity_invariants.fit_entity_invariants_use_case import (
+    FitEntityInvariantsUseCase,
+)
 from pdf_forensics.application.feature_extraction.extract_features_use_case import (
     FeatureExtractionUseCase,
 )
@@ -36,6 +39,7 @@ from pdf_forensics.application.pdf_analysis.parse_pdf_use_case import ParsePdfUs
 from pdf_forensics.application.training_corpus.build_training_corpus_use_case import (
     BuildTrainingCorpusUseCase,
 )
+from pdf_forensics.domain.entity_invariants.learned_invariant import LearnedInvariant
 from pdf_forensics.domain.features.feature_set import FeatureSet
 from pdf_forensics.plugins.anomaly_detection import default_detectors
 from pdf_forensics.plugins.entity_identification import default_entity_classifiers
@@ -48,6 +52,10 @@ ANOMALY_MIN_GENUINE_PER_ENTITY = 2
 #: Both thresholds must be met before an entity's ML Ensemble activates.
 ML_ENSEMBLE_MIN_GENUINE_PER_ENTITY = 5
 ML_ENSEMBLE_MIN_CONFIRMED_FRAUD_PER_ENTITY = 3
+#: "Constant across 2-3 documents" is a coincidence, not a template — this
+#: is deliberately higher than `ANOMALY_MIN_GENUINE_PER_ENTITY` since a
+#: learned invariant is a hard yes/no gate, not a statistical distance.
+TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +65,7 @@ class EntityRetrainSummary:
     confirmed_fraud_count: int
     anomaly_detection_fitted: bool
     ml_ensemble_ready: bool
+    invariant_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +115,16 @@ class RetrainModelsUseCase:
                 labels = [True] * len(genuine) + [False] * len(fraud)
                 TrainModelsUseCase(models).execute(feature_sets, labels)
 
+            invariants: tuple[LearnedInvariant, ...] = ()
+            if len(genuine) >= TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY:
+                invariants = FitEntityInvariantsUseCase().execute(
+                    [entry.features for entry in genuine]
+                )
+
             entity_bundles[entity] = EntityModelBundle(
                 detectors=tuple(detectors),
                 models=tuple(models),
+                invariants=invariants,
                 genuine_count=len(genuine),
                 confirmed_fraud_count=len(fraud),
                 ml_ensemble_ready=ml_ensemble_ready,
@@ -119,6 +135,7 @@ class RetrainModelsUseCase:
                     genuine_count=len(genuine),
                     confirmed_fraud_count=len(fraud),
                     anomaly_detection_fitted=bool(detectors),
+                    invariant_count=len(invariants),
                     ml_ensemble_ready=ml_ensemble_ready,
                 )
             )
