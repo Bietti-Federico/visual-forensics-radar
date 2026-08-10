@@ -19,6 +19,6 @@ class MissingInfoDictionaryRule:
             rule_id=self.rule_id,
             severity=AnomalySeverity.WARNING,
             confidence=1.0,
-            explanation="The trailer has no /Info entry resolving to a dictionary.",
+            explanation="El trailer no tiene una entrada /Info que resuelva a un diccionario.",
             references=("ISO 32000-1 §14.3.3",),
         )

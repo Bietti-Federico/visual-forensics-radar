@@ -47,8 +47,32 @@ def test_verify_with_no_trained_model_still_scores(client: TestClient) -> None:
     response = client.post("/verify", files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")})
     assert response.status_code == 200
     body = response.json()
-    assert body["entity_predictions"] == []
-    assert isinstance(body["risk_score"], int)
+    assert body["entidades_predichas"] == []
+    assert isinstance(body["puntaje_riesgo"], int)
+
+
+def test_verify_response_uses_spanish_keys(client: TestClient) -> None:
+    response = client.post("/verify", files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")})
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {
+        "huella_digital",
+        "entidades_predichas",
+        "firmas",
+        "puntaje_riesgo",
+        "componentes",
+        "motivos",
+        "caracteristicas_principales",
+    }
+    assert {c["nombre"] for c in body["componentes"]} == {
+        "motor_de_reglas",
+        "probabilidad_ml",
+        "deteccion_de_anomalias",
+        "estructural",
+        "metadatos",
+        "consistencia_de_entidad",
+        "integridad_de_firma",
+    }
 
 
 def test_verify_rejects_non_pdf(client: TestClient) -> None:
@@ -249,5 +273,5 @@ def test_verify_uses_retrained_model(client: TestClient) -> None:
     response = client.post("/verify", files={"file": ("doc.pdf", _pdf_bytes(0), "application/pdf")})
     assert response.status_code == 200
     body = response.json()
-    assert len(body["entity_predictions"]) == 1
-    assert body["entity_predictions"][0]["predicted_entity"] == "ANSES"
+    assert len(body["entidades_predichas"]) == 1
+    assert body["entidades_predichas"][0]["entidad_predicha"] == "ANSES"

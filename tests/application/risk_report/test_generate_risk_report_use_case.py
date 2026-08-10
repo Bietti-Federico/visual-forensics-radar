@@ -158,7 +158,45 @@ def test_anomaly_detection_uses_is_anomaly_flag_only() -> None:
         SignatureVerificationReport(),
     )
     anomaly_component = next(c for c in report.components if c.name == "anomaly_detection")
-    assert anomaly_component.score == 0.7
+    assert anomaly_component.score == 0.5
+
+
+def test_anomaly_detection_score_is_fraction_of_detectors_flagged() -> None:
+    # A single detector flagging out of four (e.g. one_class_svm sitting
+    # exactly on its own decision boundary — a known artifact with small
+    # per-entity training batches) shouldn't score anywhere near as high as
+    # most of the ensemble agreeing.
+    one_flagged = AnomalyDetectionReport(
+        scores=[
+            AnomalyScore(detector_id="a", score=0.0, is_anomaly=True),
+            AnomalyScore(detector_id="b", score=1.0, is_anomaly=False),
+            AnomalyScore(detector_id="c", score=1.0, is_anomaly=False),
+            AnomalyScore(detector_id="d", score=1.0, is_anomaly=False),
+        ]
+    )
+    three_flagged = AnomalyDetectionReport(
+        scores=[
+            AnomalyScore(detector_id="a", score=5.0, is_anomaly=True),
+            AnomalyScore(detector_id="b", score=5.0, is_anomaly=True),
+            AnomalyScore(detector_id="c", score=5.0, is_anomaly=True),
+            AnomalyScore(detector_id="d", score=1.0, is_anomaly=False),
+        ]
+    )
+
+    def _score(anomaly_report: AnomalyDetectionReport) -> float:
+        report = GenerateRiskReportUseCase().execute(
+            _clean_feature_set(),
+            RuleEvaluationReport(),
+            anomaly_report,
+            MlEnsembleReport(),
+            [],
+            EntityIdentificationReport(),
+            SignatureVerificationReport(),
+        )
+        return next(c for c in report.components if c.name == "anomaly_detection").score
+
+    assert _score(one_flagged) == 0.25
+    assert _score(three_flagged) == 0.75
 
 
 def test_structural_score_zero_when_features_absent() -> None:

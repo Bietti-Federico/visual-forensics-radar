@@ -34,8 +34,8 @@ class UnexpectedIncrementalUpdateRule:
             severity=AnomalySeverity.WARNING,
             confidence=1.0,
             explanation=(
-                f"Document has {revision_count} revisions, more than the expected "
-                f"baseline of {self._threshold}."
+                f"El documento tiene {revision_count} revisiones, más que el máximo "
+                f"esperado de {self._threshold}."
             ),
             references=("ISO 32000-1 §7.5.6",),
         )

@@ -29,8 +29,8 @@ class CreationAfterModDateRule:
             severity=AnomalySeverity.WARNING,
             confidence=1.0,
             explanation=(
-                f"/CreationDate ({creation.isoformat()}) is after /ModDate "
-                f"({mod.isoformat()}) once both are normalized to UTC."
+                f"La fecha de creación ({creation.isoformat()}) es posterior a la de "
+                f"modificación ({mod.isoformat()}), normalizadas ambas a UTC."
             ),
             references=("ISO 32000-1 §14.3.3",),
         )

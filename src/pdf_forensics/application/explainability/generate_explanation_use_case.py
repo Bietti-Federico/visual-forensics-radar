@@ -52,13 +52,13 @@ class GenerateExplanationUseCase:
             for finding in sorted(rule_report, key=lambda f: _SEVERITY_RANK[f.severity])
         ]
         reasons.extend(
-            f"{score.detector_id} flagged this document as anomalous (score={score.score:.3f})."
+            f"{score.detector_id} marcó este documento como anómalo (score={score.score:.3f})."
             for score in anomaly_report
             if score.is_anomaly
         )
         reasons.extend(
-            f"{prediction.model_id} predicts this document is manipulated "
-            f"(probability={prediction.probability:.0%})."
+            f"{prediction.model_id} predice que este documento está manipulado "
+            f"(probabilidad={prediction.probability:.0%})."
             for prediction in ml_report
             if prediction.predicted_label
         )

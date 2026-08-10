@@ -53,14 +53,30 @@ class CheckEntityInvariantsUseCase:
         if not violations:
             return None
 
+        # A minority of incidental violations is treated the same as
+        # before (WARNING) — with few learned invariants (see
+        # TEMPLATE_INVARIANT_MIN_GENUINE_PER_ENTITY=1), a couple of
+        # coincidental mismatches don't mean the document is fake. But a
+        # document contradicting most or all of an entity's invariants at
+        # once isn't "structurally a bit off" — every dimension the real
+        # template is consistent on disagrees, which in practice means
+        # this isn't that entity's template at all, so it's scored as
+        # CRITICAL like the strongest structural findings elsewhere.
+        severity = (
+            AnomalySeverity.CRITICAL
+            if len(violations) > len(self._invariants) / 2
+            else AnomalySeverity.WARNING
+        )
+
         return RuleFinding(
             rule_id=_RULE_ID,
-            severity=AnomalySeverity.WARNING,
+            severity=severity,
             confidence=prediction.confidence,
             explanation=(
-                f"Identified as {prediction.predicted_entity} "
-                f"(confidence={prediction.confidence:.0%}), but this document "
-                f"contradicts every real sample seen: {'; '.join(violations)}."
+                f"Identificado como {prediction.predicted_entity} "
+                f"(confianza={prediction.confidence:.0%}), pero este documento "
+                f"contradice lo observado en todos los documentos reales: "
+                f"{'; '.join(violations)}."
             ),
             references=("docs/DOCUMENTACION.md",),
         )
@@ -69,7 +85,7 @@ class CheckEntityInvariantsUseCase:
         actual = self._resolve(feature_set, invariant.feature_name)
         if actual is _MISSING or actual == invariant.expected_value:
             return None
-        return f"{invariant.feature_name} is {actual!r} (expected {invariant.expected_value!r})"
+        return f"{invariant.feature_name}={actual!r} (se esperaba {invariant.expected_value!r})"
 
     def _resolve(self, feature_set: FeatureSet, feature_name: str) -> Any:
         if HISTOGRAM_KEY_SEPARATOR in feature_name:

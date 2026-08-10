@@ -27,7 +27,7 @@ class BrokenXrefRule:
         histogram = histogram_feature.value
 
         if histogram.get(_CRITICAL_CODE, 0) > 0:
-            return self._finding(AnomalySeverity.CRITICAL, "the xref could not be parsed at all")
+            return self._finding(AnomalySeverity.CRITICAL, "no se pudo parsear el xref en absoluto")
 
         triggered = [code for code in _WARNING_CODES if histogram.get(code, 0) > 0]
         if not triggered:
@@ -39,6 +39,6 @@ class BrokenXrefRule:
             rule_id=self.rule_id,
             severity=severity,
             confidence=1.0,
-            explanation=f"Cross-reference anomalies detected: {reason}.",
+            explanation=f"Anomalías de tabla de referencias cruzadas (xref) detectadas: {reason}.",
             references=("ISO 32000-1 §7.5.4",),
         )

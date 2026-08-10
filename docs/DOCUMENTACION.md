@@ -181,7 +181,7 @@ Combina los siete componentes en un score final de 0 a 100:
 |---|---|---|
 | `rule_engine` | Noisy-OR sobre severidades de reglas | La evidencia independiente satura hacia 1.0 sin que una suma simple se pase |
 | `ml_probability` | Promedio de probabilidades del ensamble | Todas son P(manipulado), comparables entre sí |
-| `anomaly_detection` | Noisy-OR sobre flags `is_anomaly` (no el score crudo) | El score crudo no es comparable entre los 4 detectores; el flag sí |
+| `anomaly_detection` | Fracción de detectores que marcaron `is_anomaly` (no el score crudo, no Noisy-OR) | El score crudo no es comparable entre los 4 detectores; el flag sí. Un solo detector en el límite (ej. one_class_svm con score≈0, artefacto conocido con pocas muestras por entidad) pesa proporcionalmente menos que varios de acuerdo, en vez de contribuir lo mismo que un consenso real |
 | `structural` | Densidad de anomalías / cantidad de objetos | Señal general, distinta de los patrones específicos del motor de reglas |
 | `metadata` | Fracción de campos de `/Info` faltantes | Metadata faltante correlaciona con "limpieza" del documento |
 | `entity_consistency` | `1 - confianza` de identificación de entidad | Baja confianza en calzar con alguna plantilla conocida es señal |
@@ -286,7 +286,11 @@ incrementales), se autocorrigen solas a medida que entra más volumen.
 Al verificar, produce el mismo `RuleFinding` (mismo `rule_id`,
 `entity_template_mismatch`) que la regla vieja, con una explicación
 generada automáticamente a partir de los valores esperado/real en vez de
-texto escrito a mano.
+texto escrito a mano. La severidad ya no es siempre `WARNING`: si más de
+la mitad de las invariantes de la entidad quedan contradichas a la vez,
+sube a `CRITICAL` — contradecir casi todo lo que esa entidad siempre
+cumple no es "un poco distinto", es evidencia fuerte de que el documento
+no responde a esa plantilla en absoluto.
 
 ---
 
@@ -374,7 +378,7 @@ entidad.
 | Endpoint | Qué hace |
 |---|---|
 | `GET /` | Sirve el frontend estático. |
-| `POST /verify` | Sube un PDF, corre todo el pipeline en memoria, devuelve el JSON completo. `422` si no es un PDF legible. |
+| `POST /verify` | Sube un PDF, corre todo el pipeline en memoria, devuelve el JSON completo **en español** (keys y textos — ver abajo). `422` si no es un PDF legible. |
 | `POST /training-data/suggest-entity` | Corre el clasificador actual sobre un archivo y sugiere la entidad más probable — para precargar el campo al subir un documento nuevo, sin que alguien tenga que saber (o escribir bien) el nombre de la entidad. |
 | `POST /training-data/genuine` | Sube un documento genuino a `training_corpus/genuine/<entidad>/`. No reentrena. |
 | `POST /training-data/confirmed-fraud` | Igual, bajo `confirmed_fraud/`. |
@@ -388,6 +392,53 @@ entidad.
 sanitizan (`_sanitize_path_component`) antes de usarse como segmentos de
 ruta, para que no se pueda escapar del directorio del corpus. **Tamaño
 máximo de subida**: 25 MB.
+
+### El JSON de `/verify` está en español
+
+El dominio y la lógica interna (nombres de clases, features, motor de
+reglas) siguen en inglés — es lo que leen los tests, los scripts de CLI y
+el resto de este documento. Pero el límite de la API es el único lugar
+donde eso importa a un humano: `pdf_forensics_api/serialization.py`
+traduce todo lo que cruza esa frontera, tanto las *keys* como los textos
+generados, ya que los usuarios reales de este despliegue hablan español.
+Forma del JSON de `/verify`:
+
+```json
+{
+  "huella_digital": { "generador": ..., "productor": ..., "hash_estructura": ..., ... },
+  "entidades_predichas": [
+    { "clasificador": ..., "entidad_predicha": "ANSES", "confianza": 0.91, "probabilidades": {...} }
+  ],
+  "firmas": [
+    { "campo": ..., "digest_integro": true, "criptograficamente_valida": true,
+      "cobertura": "archivo_completo" | "parcial" | "no_determinada",
+      "firmante": ..., "fecha_firma": ... }
+  ],
+  "puntaje_riesgo": 21,
+  "componentes": [
+    { "nombre": "motor_de_reglas" | "probabilidad_ml" | "deteccion_de_anomalias" |
+               "estructural" | "metadatos" | "consistencia_de_entidad" | "integridad_de_firma",
+      "puntaje": 0.0, "peso": 0.31 }
+  ],
+  "motivos": ["Identificado como ANSES (confianza=91%), pero este documento contradice..."],
+  "caracteristicas_principales": [ { "modelo": ..., "caracteristica": ..., "valor_shap": ... } ]
+}
+```
+
+Los `motivos` (explicaciones de reglas, hallazgos de anomalía, predicciones
+de ML) se generan directamente en español en sus fuentes
+(`plugins/rules/*.py`, `check_entity_invariants_use_case.py`,
+`GenerateExplanationUseCase`) — no es una traducción de texto en inglés
+sobre la marcha. Los demás endpoints (`/training-data/*`, `/retrain`)
+siguen con keys en inglés por ahora; sólo `/verify` (lo que efectivamente
+ve el usuario final del sistema de carga de comprobantes) se tradujo.
+
+**Dos puntos que no siempre traen un motivo en texto**: los componentes
+`metadatos` y `estructural` son fórmulas continuas (fracción de campos de
+`/Info` faltantes; densidad de anomalías), no hallazgos binarios — pueden
+sumar puntos al `puntaje_riesgo` sin aparecer como una frase en `motivos`,
+que sólo junta explicaciones de reglas disparadas, detectores de anomalía
+marcados o predicciones de ML positivas.
 
 ### Configuración (variables de entorno)
 

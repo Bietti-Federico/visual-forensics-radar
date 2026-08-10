@@ -22,6 +22,8 @@ class DuplicateObjectIdsRule:
             rule_id=self.rule_id,
             severity=AnomalySeverity.WARNING,
             confidence=1.0,
-            explanation=f"{count} object number(s) are defined more than once in this file.",
+            explanation=(
+                f"{count} número(s) de objeto están definidos más de una vez en este archivo."
+            ),
             references=("ISO 32000-1 §7.5.4",),
         )

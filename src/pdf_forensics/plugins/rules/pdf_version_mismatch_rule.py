@@ -31,8 +31,8 @@ class PdfVersionMismatchRule:
             severity=AnomalySeverity.INFO,
             confidence=1.0,
             explanation=(
-                f"Header declares PDF version {header_version!r} but /Root/Version "
-                f"declares {catalog_version!r}."
+                f"El header declara versión de PDF {header_version!r} pero /Root/Version "
+                f"declara {catalog_version!r}."
             ),
             references=("ISO 32000-1 §7.5.2",),
         )

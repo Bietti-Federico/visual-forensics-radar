@@ -42,7 +42,6 @@ _RULE_SEVERITY_BASE_PROBABILITY = {
     AnomalySeverity.WARNING: 0.5,
     AnomalySeverity.INFO: 0.15,
 }
-_ANOMALY_DETECTOR_WEIGHT = 0.7
 _STRUCTURAL_DENSITY_MULTIPLIER = 10.0
 _METADATA_PRESENCE_FEATURES = (
     "metadata.has_title",
@@ -124,11 +123,22 @@ class GenerateRiskReportUseCase:
         return 1.0 - probability_of_no_risk
 
     def _anomaly_detection_score(self, anomaly_report: AnomalyDetectionReport) -> float:
-        probability_of_no_risk = 1.0
-        for score in anomaly_report:
-            if score.is_anomaly:
-                probability_of_no_risk *= 1.0 - _ANOMALY_DETECTOR_WEIGHT
-        return 1.0 - probability_of_no_risk
+        """
+        Fraction of configured detectors that flagged the document, not a
+        Noisy-OR with a flat per-detector weight. A flat weight (e.g. 0.7)
+        made a single detector sitting exactly on its own decision boundary
+        (a documented artifact with small per-entity training batches — see
+        `docs/DOCUMENTACION.md`) contribute as much as several independent
+        detectors actually agreeing, producing the same score for a
+        genuinely anomalous document and one with one borderline flag.
+        Agreement across more of the ensemble now scores higher than a
+        single flag, without needing to special-case any one detector.
+        """
+        scores = list(anomaly_report)
+        if not scores:
+            return 0.0
+        flagged = sum(1 for score in scores if score.is_anomaly)
+        return flagged / len(scores)
 
     def _ml_probability_score(self, ml_report: MlEnsembleReport) -> float:
         probabilities = [prediction.probability for prediction in ml_report]

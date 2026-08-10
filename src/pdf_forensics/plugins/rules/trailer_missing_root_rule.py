@@ -23,6 +23,6 @@ class TrailerMissingRootRule:
             rule_id=self.rule_id,
             severity=AnomalySeverity.WARNING,
             confidence=1.0,
-            explanation="The trailer has no /Root entry.",
+            explanation="El trailer no tiene una entrada /Root.",
             references=("ISO 32000-1 §7.5.5",),
         )
