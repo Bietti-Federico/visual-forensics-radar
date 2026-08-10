@@ -65,8 +65,9 @@ def test_anomalous_score_and_manipulated_prediction_add_reasons() -> None:
     )
 
     assert report.reasons == [
-        "isolation_forest marcó este documento como anómalo (score=1.234).",
-        "xgboost predice que este documento está manipulado (probabilidad=87%).",
+        "el detector de aislamiento (Isolation Forest) marcó este documento como fuera de "
+        "lo normal para esta entidad (score interno=1.234, no comparable entre detectores).",
+        "el modelo XGBoost predice que este documento está manipulado (probabilidad=87%).",
     ]
 
 

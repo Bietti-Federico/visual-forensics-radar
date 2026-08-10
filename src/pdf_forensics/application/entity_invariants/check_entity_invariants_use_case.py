@@ -11,6 +11,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from pdf_forensics.application.entity_invariants.feature_labels import (
+    humanize_feature,
+    humanize_value,
+)
 from pdf_forensics.application.entity_invariants.fit_entity_invariants_use_case import (
     HISTOGRAM_KEY_SEPARATOR,
 )
@@ -68,14 +72,16 @@ class CheckEntityInvariantsUseCase:
             else AnomalySeverity.WARNING
         )
 
+        count = len(violations)
+        aspecto = "aspecto" if count == 1 else "aspectos"
         return RuleFinding(
             rule_id=_RULE_ID,
             severity=severity,
             confidence=prediction.confidence,
             explanation=(
                 f"Identificado como {prediction.predicted_entity} "
-                f"(confianza={prediction.confidence:.0%}), pero este documento "
-                f"contradice lo observado en todos los documentos reales: "
+                f"(confianza={prediction.confidence:.0%}), pero el documento no coincide "
+                f"con los documentos reales de esa entidad en {count} {aspecto}: "
                 f"{'; '.join(violations)}."
             ),
             references=("docs/DOCUMENTACION.md",),
@@ -85,7 +91,11 @@ class CheckEntityInvariantsUseCase:
         actual = self._resolve(feature_set, invariant.feature_name)
         if actual is _MISSING or actual == invariant.expected_value:
             return None
-        return f"{invariant.feature_name}={actual!r} (se esperaba {invariant.expected_value!r})"
+        label = humanize_feature(invariant.feature_name)
+        return (
+            f"{label}: {humanize_value(actual)} "
+            f"(se esperaba {humanize_value(invariant.expected_value)})"
+        )
 
     def _resolve(self, feature_set: FeatureSet, feature_name: str) -> Any:
         if HISTOGRAM_KEY_SEPARATOR in feature_name:

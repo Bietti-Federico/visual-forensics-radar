@@ -113,7 +113,7 @@ def test_learned_invariant_violation_surfaces_as_rule_finding() -> None:
 
     result = use_case.execute(_document("Test Producer", 50).build())
 
-    assert any("catalog.has_acroform" in reason for reason in result.explanation.reasons)
+    assert any("formulario o firma digital" in reason for reason in result.explanation.reasons)
 
 
 def test_unrecognized_entity_falls_back_to_empty_bundle() -> None:

@@ -24,6 +24,24 @@ _SEVERITY_RANK = {
     AnomalySeverity.INFO: 2,
 }
 
+#: Plain-language labels for the bounded, fixed set of detector/model ids
+#: this platform ships (`plugins/anomaly_detection/`, `plugins/ml_ensemble/`)
+#: — an unrecognized id (there shouldn't be one) still displays as-is.
+_DETECTOR_LABELS = {
+    "isolation_forest": "el detector de aislamiento (Isolation Forest)",
+    "one_class_svm": "el detector de frontera (One-Class SVM)",
+    "local_outlier_factor": "el detector de densidad local (Local Outlier Factor)",
+    "autoencoder": "el autoencoder",
+}
+_MODEL_LABELS = {
+    "random_forest": "el modelo de bosque aleatorio (Random Forest)",
+    "extra_trees": "el modelo de árboles extra (Extra Trees)",
+    "logistic_regression": "el modelo de regresión logística",
+    "xgboost": "el modelo XGBoost",
+    "stacking_ensemble": "el ensamble por apilado (Stacking)",
+    "voting_ensemble": "el ensamble por votación (Voting)",
+}
+
 
 class GenerateExplanationUseCase:
     def __init__(self, top_n_features: int = _DEFAULT_TOP_N_FEATURES) -> None:
@@ -52,13 +70,15 @@ class GenerateExplanationUseCase:
             for finding in sorted(rule_report, key=lambda f: _SEVERITY_RANK[f.severity])
         ]
         reasons.extend(
-            f"{score.detector_id} marcó este documento como anómalo (score={score.score:.3f})."
+            f"{_DETECTOR_LABELS.get(score.detector_id, score.detector_id)} marcó este "
+            f"documento como fuera de lo normal para esta entidad "
+            f"(score interno={score.score:.3f}, no comparable entre detectores)."
             for score in anomaly_report
             if score.is_anomaly
         )
         reasons.extend(
-            f"{prediction.model_id} predice que este documento está manipulado "
-            f"(probabilidad={prediction.probability:.0%})."
+            f"{_MODEL_LABELS.get(prediction.model_id, prediction.model_id)} predice que "
+            f"este documento está manipulado (probabilidad={prediction.probability:.0%})."
             for prediction in ml_report
             if prediction.predicted_label
         )

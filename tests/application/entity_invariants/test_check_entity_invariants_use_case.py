@@ -53,7 +53,7 @@ def test_mismatched_value_produces_warning_finding_naming_the_violation() -> Non
 
     assert finding is not None
     assert finding.rule_id == "entity_template_mismatch"
-    assert "catalog.has_acroform" in finding.explanation
+    assert "formulario o firma digital" in finding.explanation
     assert "ANSES" in finding.explanation
 
 
@@ -110,4 +110,4 @@ def test_histogram_derived_invariant_is_checked_against_dict_feature() -> None:
     finding = CheckEntityInvariantsUseCase(invariants).execute(feature_set, _report("ANSES", 0.9))
 
     assert finding is not None
-    assert "streams.filter_histogram::DCTDecode" in finding.explanation
+    assert "cantidad de streams con filtro DCTDecode" in finding.explanation
