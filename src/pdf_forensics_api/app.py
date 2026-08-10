@@ -27,6 +27,12 @@ from fastapi.staticfiles import StaticFiles
 from pdf_forensics.application.document_scoring.score_document_use_case import (
     ScoreDocumentUseCase,
 )
+from pdf_forensics.application.entity_identification.identify_entity_use_case import (
+    IdentifyEntityUseCase,
+)
+from pdf_forensics.application.feature_extraction.extract_features_use_case import (
+    FeatureExtractionUseCase,
+)
 from pdf_forensics.application.model_persistence.load_trained_models_use_case import (
     LoadTrainedModelsUseCase,
 )
@@ -38,6 +44,7 @@ from pdf_forensics.domain.pdf.errors import NotAPdfError, UnrecoverableStructure
 from pdf_forensics.infrastructure.training_corpus.filesystem_training_corpus_reader import (
     read_training_corpus_files,
 )
+from pdf_forensics.plugins.features import default_feature_extractors
 from pdf_forensics_api.config import get_model_store_path, get_training_corpus_dir
 from pdf_forensics_api.serialization import serialize_scoring_result
 
@@ -113,6 +120,31 @@ async def verify(request: Request, file: UploadFile = File(...)) -> dict[str, An
     return serialize_scoring_result(result)
 
 
+@app.post("/training-data/suggest-entity")
+async def suggest_entity(
+    request: Request, file: UploadFile = File(...)  # noqa: B008
+) -> dict[str, Any]:
+    """Entities are meant to scale purely by uploading documents, without
+    someone having to already know (or type correctly) which entity a new
+    file belongs to. Runs the currently loaded entity classifier against an
+    uploaded file and returns its top guess, for the frontend to pre-fill
+    the training-upload entity field — still editable, since a genuinely
+    new entity (or one not confident yet) has no classifier to guess it."""
+    pdf_bytes = await _read_upload(file)
+    try:
+        document = ParsePdfUseCase().execute(pdf_bytes)
+    except (NotAPdfError, UnrecoverableStructureError) as exc:
+        raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
+
+    feature_set = FeatureExtractionUseCase(default_feature_extractors()).execute(document)
+    entity_report = IdentifyEntityUseCase(request.app.state.entity_classifiers).execute(feature_set)
+    if not entity_report.predictions:
+        return {"suggested_entity": None, "confidence": None}
+
+    top = entity_report.predictions[0]
+    return {"suggested_entity": top.predicted_entity, "confidence": top.confidence}
+
+
 def _save_training_file(pdf_bytes: bytes, filename: str, entity: str, *, is_genuine: bool) -> Path:
     safe_entity = _sanitize_path_component(entity, default="UNKNOWN_ENTITY")
     safe_filename = _sanitize_path_component(filename, default="upload.pdf")
@@ -158,6 +190,41 @@ def training_data_summary() -> dict[str, Any]:
         counts = entities.setdefault(ref.entity, {"genuine": 0, "confirmed_fraud": 0})
         counts["genuine" if ref.is_genuine else "confirmed_fraud"] += 1
     return {"entities": entities}
+
+
+@app.get("/training-data/files")
+def training_data_files() -> dict[str, Any]:
+    """Per-file listing (not just aggregate counts) so the frontend can
+    show, and let someone remove, individual training documents."""
+    refs = read_training_corpus_files(get_training_corpus_dir())
+    return {
+        "files": [
+            {"entity": ref.entity, "is_genuine": ref.is_genuine, "filename": ref.path.name}
+            for ref in refs
+        ]
+    }
+
+
+def _delete_training_file(entity: str, filename: str, *, is_genuine: bool) -> None:
+    safe_entity = _sanitize_path_component(entity, default="UNKNOWN_ENTITY")
+    safe_filename = _sanitize_path_component(filename, default="upload.pdf")
+    subdir = "genuine" if is_genuine else "confirmed_fraud"
+    target_path = get_training_corpus_dir() / subdir / safe_entity / safe_filename
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+    target_path.unlink()
+
+
+@app.delete("/training-data/genuine/{entity}/{filename}")
+def delete_genuine(entity: str, filename: str) -> dict[str, Any]:
+    _delete_training_file(entity, filename, is_genuine=True)
+    return {"deleted": True}
+
+
+@app.delete("/training-data/confirmed-fraud/{entity}/{filename}")
+def delete_confirmed_fraud(entity: str, filename: str) -> dict[str, Any]:
+    _delete_training_file(entity, filename, is_genuine=False)
+    return {"deleted": True}
 
 
 @app.post("/retrain")

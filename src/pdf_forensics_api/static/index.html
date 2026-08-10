@@ -30,23 +30,30 @@
   <div id="verify-drop" class="drop">Arrastrá un PDF acá, o hacé click para elegir uno</div>
   <input id="verify-input" type="file" accept="application/pdf" style="display:none" />
   <div id="verify-result"></div>
+  <details>
+    <summary>JSON completo (lo que recibiría el consumer)</summary>
+    <pre id="verify-json"></pre>
+  </details>
 </section>
 
 <section>
   <h2>Corpus de entrenamiento</h2>
   <div id="corpus-summary" class="muted">Cargando…</div>
   <table id="corpus-table"></table>
+  <table id="files-table"></table>
 </section>
 
 <section>
   <h2>Agregar documento de entrenamiento</h2>
+  <p class="muted">La entidad se sugiere automáticamente al elegir el archivo. Para una entidad nueva (o si la sugerencia no es confiable), escribila a mano.</p>
+  <input id="upload-input" type="file" accept="application/pdf" />
   <input id="upload-entity" type="text" placeholder="Entidad (ej: ANSES)" />
   <select id="upload-kind">
     <option value="genuine">Genuino</option>
     <option value="confirmed-fraud">Fraude confirmado</option>
   </select>
-  <input id="upload-input" type="file" accept="application/pdf" />
   <button id="upload-btn">Subir</button>
+  <div id="upload-suggestion" class="muted"></div>
   <div id="upload-result" class="muted"></div>
 </section>
 
@@ -58,14 +65,37 @@
 
 <script>
 async function refreshCorpusSummary() {
-  const res = await fetch('/training-data/summary');
-  const data = await res.json();
-  const entities = Object.keys(data.entities).sort();
+  const [summaryRes, filesRes] = await Promise.all([
+    fetch('/training-data/summary'),
+    fetch('/training-data/files'),
+  ]);
+  const summary = await summaryRes.json();
+  const files = (await filesRes.json()).files;
+
+  const entities = Object.keys(summary.entities).sort();
   document.getElementById('corpus-summary').textContent =
     entities.length ? `${entities.length} entidad(es) en el corpus.` : 'Sin documentos todavía.';
-  const table = document.getElementById('corpus-table');
-  table.innerHTML = '<tr><th>Entidad</th><th>Genuinos</th><th>Fraude confirmado</th></tr>' +
-    entities.map(e => `<tr><td>${e}</td><td>${data.entities[e].genuine}</td><td>${data.entities[e].confirmed_fraud}</td></tr>`).join('');
+  const summaryTable = document.getElementById('corpus-table');
+  summaryTable.innerHTML = '<tr><th>Entidad</th><th>Genuinos</th><th>Fraude confirmado</th></tr>' +
+    entities.map(e => `<tr><td>${e}</td><td>${summary.entities[e].genuine}</td><td>${summary.entities[e].confirmed_fraud}</td></tr>`).join('');
+
+  const filesTable = document.getElementById('files-table');
+  filesTable.innerHTML = '<tr><th>Entidad</th><th>Tipo</th><th>Archivo</th><th></th></tr>' +
+    files.map(f => `<tr>
+      <td>${f.entity}</td>
+      <td>${f.is_genuine ? 'Genuino' : 'Fraude confirmado'}</td>
+      <td>${f.filename}</td>
+      <td><button data-entity="${f.entity}" data-filename="${f.filename}" data-genuine="${f.is_genuine}" class="delete-file-btn">Quitar</button></td>
+    </tr>`).join('');
+  filesTable.querySelectorAll('.delete-file-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteTrainingFile(btn.dataset.entity, btn.dataset.filename, btn.dataset.genuine === 'true'));
+  });
+}
+
+async function deleteTrainingFile(entity, filename, isGenuine) {
+  const endpoint = isGenuine ? '/training-data/genuine' : '/training-data/confirmed-fraud';
+  await fetch(`${endpoint}/${encodeURIComponent(entity)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  refreshCorpusSummary();
 }
 
 function riskClass(score) {
@@ -76,7 +106,9 @@ function riskClass(score) {
 
 async function verifyFile(file) {
   const resultDiv = document.getElementById('verify-result');
+  const jsonPre = document.getElementById('verify-json');
   resultDiv.innerHTML = '<p class="muted">Analizando…</p>';
+  jsonPre.textContent = '';
   const formData = new FormData();
   formData.append('file', file);
   const res = await fetch('/verify', { method: 'POST', body: formData });
@@ -85,6 +117,7 @@ async function verifyFile(file) {
     return;
   }
   const data = await res.json();
+  jsonPre.textContent = JSON.stringify(data, null, 2);
   const entities = data.entity_predictions.map(p =>
     `${p.predicted_entity} (${(p.confidence * 100).toFixed(0)}%)`).join(', ') || 'sin predicción';
   const signatures = data.signatures.length
@@ -109,6 +142,29 @@ dropZone.addEventListener('drop', e => {
   e.preventDefault();
   dropZone.classList.remove('drag');
   if (e.dataTransfer.files[0]) verifyFile(e.dataTransfer.files[0]);
+});
+
+document.getElementById('upload-input').addEventListener('change', async () => {
+  const file = document.getElementById('upload-input').files[0];
+  const suggestionDiv = document.getElementById('upload-suggestion');
+  const entityInput = document.getElementById('upload-entity');
+  if (!file) return;
+  suggestionDiv.textContent = 'Sugiriendo entidad…';
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch('/training-data/suggest-entity', { method: 'POST', body: formData });
+  if (!res.ok) {
+    suggestionDiv.textContent = 'No se pudo sugerir una entidad (¿archivo no es un PDF válido?).';
+    return;
+  }
+  const data = await res.json();
+  if (data.suggested_entity) {
+    entityInput.value = data.suggested_entity;
+    suggestionDiv.textContent = `Sugerida: ${data.suggested_entity} (${(data.confidence * 100).toFixed(0)}%). Editá si no es correcta o es una entidad nueva.`;
+  } else {
+    entityInput.value = '';
+    suggestionDiv.textContent = 'No hay modelo entrenado todavía (o ninguna entidad conocida) — escribí la entidad a mano.';
+  }
 });
 
 document.getElementById('upload-btn').addEventListener('click', async () => {

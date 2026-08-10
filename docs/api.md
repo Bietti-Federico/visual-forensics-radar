@@ -186,9 +186,13 @@ rather than part of it.
 |---|---|
 | `GET /` | Serves the static frontend (`static/index.html`). |
 | `POST /verify` | Multipart file upload. Runs `ScoreDocumentUseCase` entirely in memory; nothing is written to disk. Returns the risk score, its components, entity prediction, signature results, and explanation reasons as JSON. `422` if the file isn't a readable PDF. |
+| `POST /training-data/suggest-entity` | Multipart file. Runs the currently loaded entity classifier and returns its top guess (`{"suggested_entity": ..., "confidence": ...}`, both `null` if nothing's trained yet or no prediction). Lets the frontend pre-fill the entity field on a general upload instead of requiring someone to already know the right name — still editable, since a genuinely new/low-confidence entity has nothing to guess from. |
 | `POST /training-data/genuine` | Multipart file + `entity` form field. Validates the file is a readable PDF (`422` otherwise), then saves it under `training_corpus/genuine/<entity>/`. Does **not** retrain. |
 | `POST /training-data/confirmed-fraud` | Same as above, under `training_corpus/confirmed_fraud/<entity>/`. |
 | `GET /training-data/summary` | Live directory scan (not cached) — per-entity genuine/confirmed-fraud counts, so the frontend can show what's changed since the last retrain. |
+| `GET /training-data/files` | Live directory scan, one entry per file (`entity`, `is_genuine`, `filename`) — lets the frontend list and target individual files, not just aggregate counts. |
+| `DELETE /training-data/genuine/{entity}/{filename}` | Removes one genuine training file. `404` if it doesn't exist. Doesn't retrain — a stale model still reflects the deleted file until the next `/retrain`. |
+| `DELETE /training-data/confirmed-fraud/{entity}/{filename}` | Same, under `confirmed_fraud/`. |
 | `POST /retrain` | Runs `RetrainModelsUseCase` against the whole corpus, overwrites `model_store.joblib`, then reloads the in-memory bundle so `/verify` reflects it immediately — no process restart needed. Returns per-entity counts and readiness flags. |
 
 The trained bundle loads once at process startup via FastAPI's `lifespan`
@@ -225,11 +229,23 @@ poetry run uvicorn pdf_forensics_api.app:app --host 0.0.0.0 --port 8000
 
 `src/pdf_forensics_api/static/index.html` — a single static file, vanilla
 JS `fetch()`, no build step, served directly by the same backend at `/`.
-Three sections: drag-and-drop verify (renders the JSON result readably),
-an upload form for genuine/confirmed-fraud training files (entity is a
-free-text field, not a fixed dropdown, since adding a new entity is meant
-to need no code change), and a retrain button that shows the live corpus
-summary and the last retrain result.
+Three sections:
+
+- **Verify**: drag-and-drop, renders the risk score/entity/signature/reasons
+  readably, plus a collapsed `<details>` block with the exact JSON
+  `/verify` returns — what a consuming system would actually receive, for
+  debugging the integration itself.
+- **Corpus**: an aggregate per-entity summary table, and a per-file table
+  (`GET /training-data/files`) with a "Quitar" button per row calling the
+  matching `DELETE` endpoint — so a bad or duplicate upload can be removed
+  before the next retrain, not just added to.
+- **Add a training document**: entity is a free-text field, not a fixed
+  dropdown (adding a new entity is meant to need no code change), but it's
+  pre-filled automatically — selecting a file calls
+  `POST /training-data/suggest-entity` and fills the field with the
+  current model's top guess (still editable, since a brand-new entity has
+  no classifier yet to guess it from). Below that, a retrain button shows
+  the last retrain result.
 
 ## A signature-verification pitfall this surfaced
 

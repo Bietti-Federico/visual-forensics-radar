@@ -142,6 +142,100 @@ def test_retrain_reflects_uploaded_documents(client: TestClient) -> None:
     assert entity_summary["genuine_count"] == 3
 
 
+def test_files_listing_reflects_uploads(client: TestClient) -> None:
+    client.post(
+        "/training-data/genuine",
+        data={"entity": "ANSES"},
+        files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    client.post(
+        "/training-data/confirmed-fraud",
+        data={"entity": "ANSES"},
+        files={"file": ("fraud.pdf", _pdf_bytes(1), "application/pdf")},
+    )
+
+    files = client.get("/training-data/files").json()["files"]
+    assert len(files) == 2
+    assert {"entity": "ANSES", "is_genuine": True, "filename": "doc.pdf"} in files
+    assert {"entity": "ANSES", "is_genuine": False, "filename": "fraud.pdf"} in files
+
+
+def test_delete_genuine_file_removes_it_and_updates_summary(client: TestClient) -> None:
+    upload = client.post(
+        "/training-data/genuine",
+        data={"entity": "ANSES"},
+        files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    filename = Path(upload.json()["saved_to"]).name
+
+    files = client.get("/training-data/files").json()["files"]
+    assert {"entity": "ANSES", "is_genuine": True, "filename": filename} in files
+
+    response = client.delete(f"/training-data/genuine/ANSES/{filename}")
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
+
+    summary = client.get("/training-data/summary").json()
+    assert summary["entities"] == {}
+    assert client.get("/training-data/files").json()["files"] == []
+
+
+def test_delete_confirmed_fraud_file_removes_it(client: TestClient) -> None:
+    upload = client.post(
+        "/training-data/confirmed-fraud",
+        data={"entity": "ANSES"},
+        files={"file": ("fraud.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    filename = Path(upload.json()["saved_to"]).name
+
+    response = client.delete(f"/training-data/confirmed-fraud/ANSES/{filename}")
+    assert response.status_code == 200
+
+    summary = client.get("/training-data/summary").json()
+    assert summary["entities"] == {}
+
+
+def test_delete_missing_file_returns_404(client: TestClient) -> None:
+    response = client.delete("/training-data/genuine/ANSES/does_not_exist.pdf")
+    assert response.status_code == 404
+
+
+def test_suggest_entity_with_no_trained_model_returns_none(client: TestClient) -> None:
+    response = client.post(
+        "/training-data/suggest-entity",
+        files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"suggested_entity": None, "confidence": None}
+
+
+def test_suggest_entity_rejects_non_pdf(client: TestClient) -> None:
+    response = client.post(
+        "/training-data/suggest-entity",
+        files={"file": ("doc.pdf", b"not a pdf", "application/pdf")},
+    )
+    assert response.status_code == 422
+
+
+def test_suggest_entity_uses_retrained_model(client: TestClient) -> None:
+    for i in range(3):
+        client.post(
+            "/training-data/genuine",
+            data={"entity": "ANSES"},
+            files={"file": (f"doc{i}.pdf", _pdf_bytes(i), "application/pdf")},
+        )
+    client.post("/retrain")
+
+    response = client.post(
+        "/training-data/suggest-entity",
+        files={"file": ("doc.pdf", _pdf_bytes(0), "application/pdf")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["suggested_entity"] == "ANSES"
+    assert body["confidence"] > 0
+
+
 def test_verify_uses_retrained_model(client: TestClient) -> None:
     for i in range(3):
         client.post(
