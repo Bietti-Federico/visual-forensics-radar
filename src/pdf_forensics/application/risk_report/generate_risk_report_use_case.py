@@ -165,12 +165,12 @@ class GenerateRiskReportUseCase:
         `1 - confidence`, not a true claimed-vs-actual mismatch check: this
         platform has no way yet to read which institution a document's own
         *visible content* claims to be from (Module 2 does structural/
-        metadata features, not page text layout) — see
-        docs/entity-identification.md. A low score here means "this
-        document's structure/producer doesn't confidently match any of the
-        real-world templates the classifier has seen," a genuine and useful
-        signal on its own, just not the full claimed-vs-actual check the
-        brief's `Generator Confidence` ultimately implies.
+        metadata features, not page text layout) — see `docs/DOCUMENTACION.md`.
+        A low score here means "this document's structure/producer doesn't
+        confidently match any of the real-world templates the classifier has
+        seen," a genuine and useful signal on its own, just not the full
+        claimed-vs-actual check the brief's `Generator Confidence` ultimately
+        implies.
         """
         confidences = [prediction.confidence for prediction in entity_report]
         if not confidences:

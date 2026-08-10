@@ -21,6 +21,7 @@ def _pdf_bytes(variant: int = 0) -> bytes:
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("PDF_FORENSICS_TRAINING_CORPUS_DIR", str(tmp_path / "corpus"))
     monkeypatch.setenv("PDF_FORENSICS_MODEL_STORE_PATH", str(tmp_path / "model.joblib"))
+    monkeypatch.setenv("PDF_FORENSICS_LOG_PATH", str(tmp_path / "test.log"))
     # Imported after the env vars are set: config.py reads them fresh on
     # every call, but the app module itself must not have been imported
     # (and its lifespan run) before the paths are in place.

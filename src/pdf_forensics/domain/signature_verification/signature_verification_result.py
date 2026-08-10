@@ -5,7 +5,7 @@ trust root needs the actual issuing authority's root certificate configured
 (e.g. Argentina's ONTI root for AFIP/ANSES-issued certificates), which this
 platform doesn't ship. Reporting "not trusted" without that configured would
 read as a red flag on every single genuine signature, which is worse than
-not reporting it at all — see `docs/signature-verification.md`.
+not reporting it at all — see `docs/DOCUMENTACION.md`.
 """
 
 from __future__ import annotations

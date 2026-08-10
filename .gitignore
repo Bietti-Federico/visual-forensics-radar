@@ -16,3 +16,4 @@ venv/
 # /retrain, never checked in (real documents may contain personal data).
 /training_corpus/
 /model_store.joblib
+/pdf_forensics_api.log*

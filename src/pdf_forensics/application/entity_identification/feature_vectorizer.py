@@ -6,7 +6,7 @@ strings, passed through raw rather than dropped. In practice the producer
 string is the single strongest signal observed so far — each of the three
 real-world templates analyzed uses a distinct, internally consistent
 producer (`iTextSharp 5.5.13.4` / `iTextSharp 5.5.8` / `mPDF 5.7`), see
-docs/entity-identification.md. `DictVectorizer` one-hot-encodes string values
+`docs/DOCUMENTACION.md`. `DictVectorizer` one-hot-encodes string values
 automatically, so no separate encoding step is needed here.
 """
 

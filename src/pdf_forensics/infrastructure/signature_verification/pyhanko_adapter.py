@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import io
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
@@ -43,20 +43,32 @@ _COVERAGE_MAP = {
 _T = TypeVar("_T")
 
 
-def _run_coro_sync(coro: Coroutine[Any, Any, _T]) -> _T:
+def _run_coros_sync(coros: Sequence[Coroutine[Any, Any, _T]]) -> list[_T | BaseException]:
     """pyHanko's signature validation is async internally; this adapter is
     called synchronously from both plain scripts and FastAPI's async
     `/verify` handler. `asyncio.run()` raises if a loop is already running
     (as it is inside a FastAPI request) — that used to be silently
-    swallowed by the broad `except Exception` below, dropping every
-    signature found on documents verified through the API. Running the
-    coroutine on a dedicated thread sidesteps the already-running loop."""
+    swallowed by a broad `except Exception`, dropping every signature found
+    on documents verified through the API. Running every signature's
+    coroutine together through one dedicated thread/event loop (instead of
+    spinning up a new thread and loop per signature) sidesteps the
+    already-running loop and avoids that per-signature setup/teardown cost
+    on multiply-signed documents. `return_exceptions=True` keeps one
+    signature's validation failure from cancelling the others."""
+
+    async def _gather() -> list[_T | BaseException]:
+        # `asyncio.gather(*coros)` must be constructed inside the coroutine
+        # that `asyncio.run()` actually drives — calling it beforehand binds
+        # it to whatever event loop happens to be current at that moment
+        # (or none), which `asyncio.run()` then rejects as "not a coroutine".
+        return await asyncio.gather(*coros, return_exceptions=True)
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return asyncio.run(_gather())
     with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(asyncio.run, coro).result()
+        return executor.submit(asyncio.run, _gather()).result()
 
 
 def read_signature_verification_report(pdf_bytes: bytes) -> SignatureVerificationReport:
@@ -73,11 +85,13 @@ def read_signature_verification_report(pdf_bytes: bytes) -> SignatureVerificatio
     except Exception:
         return SignatureVerificationReport()
 
+    statuses = _run_coros_sync(
+        [async_validate_pdf_signature(signature) for signature in embedded_signatures]
+    )
+
     results = []
-    for embedded_signature in embedded_signatures:
-        try:
-            status = _run_coro_sync(async_validate_pdf_signature(embedded_signature))
-        except Exception:
+    for embedded_signature, status in zip(embedded_signatures, statuses, strict=True):
+        if isinstance(status, BaseException):
             continue
         results.append(
             SignatureVerificationResult(

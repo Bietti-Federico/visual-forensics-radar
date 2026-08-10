@@ -62,7 +62,7 @@ class CheckEntityInvariantsUseCase:
                 f"(confidence={prediction.confidence:.0%}), but this document "
                 f"contradicts every real sample seen: {'; '.join(violations)}."
             ),
-            references=("docs/entity-identification.md",),
+            references=("docs/DOCUMENTACION.md",),
         )
 
     def _check(self, feature_set: FeatureSet, invariant: LearnedInvariant) -> str | None:

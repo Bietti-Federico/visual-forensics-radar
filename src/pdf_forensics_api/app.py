@@ -9,10 +9,17 @@ below) and held in `app.state`; `/retrain` reloads it in place afterward so
 `/verify` reflects the new model immediately, with no process restart.
 `/verify` never writes anything to disk — the uploaded bytes are processed
 entirely in memory and discarded once the response is built.
+
+Basic file logging (`logging_config.py`) is configured once at startup —
+every endpoint logs its outcome, and any unhandled exception is caught by
+`handle_unexpected_error` below and logged with its full traceback before
+returning a generic 500, so a production error is always in the log even
+if nothing else surfaces it.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from collections.abc import AsyncIterator
@@ -21,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pdf_forensics.application.document_scoring.score_document_use_case import (
@@ -46,7 +53,10 @@ from pdf_forensics.infrastructure.training_corpus.filesystem_training_corpus_rea
 )
 from pdf_forensics.plugins.features import default_feature_extractors
 from pdf_forensics_api.config import get_model_store_path, get_training_corpus_dir
+from pdf_forensics_api.logging_config import configure_logging
 from pdf_forensics_api.serialization import serialize_scoring_result
+
+logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -71,18 +81,39 @@ def _reload_model_state(app: FastAPI) -> None:
         app.state.entity_classifiers, app.state.per_entity = LoadTrainedModelsUseCase().execute(
             model_store_path
         )
+        logger.info(
+            "Modelo cargado desde %s (%d entidades)",
+            model_store_path,
+            len(app.state.per_entity),
+        )
     else:
         app.state.entity_classifiers, app.state.per_entity = (), {}
+        logger.info(
+            "No hay modelo entrenado todavía en %s; arrancando sin modelo.", model_store_path
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Configured here, not at module import time, so tests can point
+    # PDF_FORENSICS_LOG_PATH at a tmp_path before this runs — matching how
+    # config.py's paths are read fresh rather than cached at import time.
+    configure_logging()
     _reload_model_state(app)
     yield
 
 
 app = FastAPI(title="PDF Forensics Verification API", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+
+@app.exception_handler(Exception)
+async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    # `exc_info=exc` (no `logger.exception`) porque no estamos necesariamente
+    # dentro de un bloque `except` desde el punto de vista de este handler —
+    # pasar la excepción explícita es lo que garantiza el traceback en el log.
+    logger.error("Error no controlado en %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
 
 
 @app.get("/")
@@ -93,17 +124,19 @@ def index() -> FileResponse:
 async def _read_upload(file: UploadFile) -> bytes:
     data = await file.read()
     if len(data) > _MAX_UPLOAD_BYTES:
+        logger.warning("Archivo %r rechazado por tamaño: %d bytes", file.filename, len(data))
         raise HTTPException(status_code=413, detail="File too large.")
     return data
 
 
-def _parse_or_422(pdf_bytes: bytes) -> None:
+def _parse_or_422(pdf_bytes: bytes, *, filename: str | None) -> None:
     """Fails fast on non-PDF uploads for the training endpoints, so the
     corpus never accumulates files `RetrainModelsUseCase` would just skip
     later anyway — surfacing the problem at upload time is more useful."""
     try:
         ParsePdfUseCase().execute(pdf_bytes)
     except (NotAPdfError, UnrecoverableStructureError) as exc:
+        logger.warning("Archivo %r no es un PDF legible: %s", filename, exc)
         raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
 
 
@@ -116,7 +149,18 @@ async def verify(request: Request, file: UploadFile = File(...)) -> dict[str, An
     try:
         result = use_case.execute(pdf_bytes)
     except (NotAPdfError, UnrecoverableStructureError) as exc:
+        logger.warning("Verificación de %r falló: no es un PDF legible: %s", file.filename, exc)
         raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
+    logger.info(
+        "Verificado %r: riesgo=%d entidad=%s",
+        file.filename,
+        result.risk_report.risk_score,
+        (
+            result.entity_report.predictions[0].predicted_entity
+            if result.entity_report.predictions
+            else "desconocida"
+        ),
+    )
     return serialize_scoring_result(result)
 
 
@@ -145,21 +189,33 @@ async def suggest_entity(
     return {"suggested_entity": top.predicted_entity, "confidence": top.confidence}
 
 
-def _save_training_file(pdf_bytes: bytes, filename: str, entity: str, *, is_genuine: bool) -> Path:
+def _training_file_dir(entity: str, *, is_genuine: bool) -> Path:
     safe_entity = _sanitize_path_component(entity, default="UNKNOWN_ENTITY")
+    subdir = "genuine" if is_genuine else "confirmed_fraud"
+    return get_training_corpus_dir() / subdir / safe_entity
+
+
+def _save_training_file(pdf_bytes: bytes, filename: str, entity: str, *, is_genuine: bool) -> Path:
     safe_filename = _sanitize_path_component(filename, default="upload.pdf")
     if not safe_filename.lower().endswith(".pdf"):
         safe_filename += ".pdf"
 
-    subdir = "genuine" if is_genuine else "confirmed_fraud"
-    target_dir = get_training_corpus_dir() / subdir / safe_entity
+    target_dir = _training_file_dir(entity, is_genuine=is_genuine)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     target_path = target_dir / safe_filename
-    if target_path.exists():
-        target_path = target_dir / f"{target_path.stem}-{uuid.uuid4().hex[:8]}{target_path.suffix}"
-    target_path.write_bytes(pdf_bytes)
-    return target_path
+    # Exclusive create, not an exists()-then-write_bytes() check: two
+    # concurrent uploads sanitizing to the same filename could otherwise
+    # both pass the check and one silently overwrite the other.
+    while True:
+        try:
+            with target_path.open("xb") as target_file:
+                target_file.write(pdf_bytes)
+            return target_path
+        except FileExistsError:
+            target_path = (
+                target_dir / f"{target_path.stem}-{uuid.uuid4().hex[:8]}{target_path.suffix}"
+            )
 
 
 @app.post("/training-data/genuine")
@@ -167,8 +223,9 @@ async def upload_genuine(
     entity: str = Form(...), file: UploadFile = File(...)  # noqa: B008
 ) -> dict[str, Any]:
     pdf_bytes = await _read_upload(file)
-    _parse_or_422(pdf_bytes)
+    _parse_or_422(pdf_bytes, filename=file.filename)
     path = _save_training_file(pdf_bytes, file.filename or "upload.pdf", entity, is_genuine=True)
+    logger.info("Documento genuino agregado: entidad=%s archivo=%s", entity, path)
     return {"saved_to": str(path)}
 
 
@@ -177,8 +234,9 @@ async def upload_confirmed_fraud(
     entity: str = Form(...), file: UploadFile = File(...)  # noqa: B008
 ) -> dict[str, Any]:
     pdf_bytes = await _read_upload(file)
-    _parse_or_422(pdf_bytes)
+    _parse_or_422(pdf_bytes, filename=file.filename)
     path = _save_training_file(pdf_bytes, file.filename or "upload.pdf", entity, is_genuine=False)
+    logger.info("Fraude confirmado agregado: entidad=%s archivo=%s", entity, path)
     return {"saved_to": str(path)}
 
 
@@ -206,13 +264,13 @@ def training_data_files() -> dict[str, Any]:
 
 
 def _delete_training_file(entity: str, filename: str, *, is_genuine: bool) -> None:
-    safe_entity = _sanitize_path_component(entity, default="UNKNOWN_ENTITY")
     safe_filename = _sanitize_path_component(filename, default="upload.pdf")
-    subdir = "genuine" if is_genuine else "confirmed_fraud"
-    target_path = get_training_corpus_dir() / subdir / safe_entity / safe_filename
+    target_path = _training_file_dir(entity, is_genuine=is_genuine) / safe_filename
     if not target_path.is_file():
+        logger.warning("Intento de borrar archivo inexistente: %s", target_path)
         raise HTTPException(status_code=404, detail="File not found.")
     target_path.unlink()
+    logger.info("Archivo de entrenamiento eliminado: %s", target_path)
 
 
 @app.delete("/training-data/genuine/{entity}/{filename}")
@@ -229,8 +287,15 @@ def delete_confirmed_fraud(entity: str, filename: str) -> dict[str, Any]:
 
 @app.post("/retrain")
 def retrain(request: Request) -> dict[str, Any]:
+    logger.info("Reentrenamiento iniciado.")
     summary = RetrainModelsUseCase(get_model_store_path()).execute(get_training_corpus_dir())
     _reload_model_state(request.app)
+    logger.info(
+        "Reentrenamiento terminado: %d documentos, %d omitidos, %d entidades.",
+        summary.total_entries,
+        summary.skipped_count,
+        len(summary.per_entity),
+    )
     return {
         "total_entries": summary.total_entries,
         "skipped_count": summary.skipped_count,

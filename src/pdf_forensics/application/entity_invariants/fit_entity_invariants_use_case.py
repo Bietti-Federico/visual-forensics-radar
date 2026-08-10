@@ -6,7 +6,7 @@ Deliberately restricted to two feature shapes: boolean structural flags,
 checked directly, and per-key counts derived from dict-valued histogram
 features (e.g. `streams.filter_histogram`), flattened into one synthetic
 feature per key seen (`streams.filter_histogram::DCTDecode`). See
-`docs/rule-engine.md` for why continuous scalar features (byte counts,
+`docs/DOCUMENTACION.md` for why continuous scalar features (byte counts,
 object counts, page counts, ...) are excluded from mining — those vary with
 a document's genuine content and would turn a coincidental match in a small
 fitting batch into constant false positives once the corpus grows.
