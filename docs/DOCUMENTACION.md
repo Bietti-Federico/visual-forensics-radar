@@ -158,6 +158,23 @@ predicción estructural. Lo implementado es más angosto pero real:
 "¿la estructura de este documento coincide con confianza con alguna de
 las plantillas reales que el clasificador vio?"
 
+### Hiperparámetros ajustados para lotes chicos, no los de sklearn por defecto
+
+`RandomForestClassifier` con `bootstrap=False` y `max_features=None`, no
+los valores por defecto. Con sólo 2-3 documentos genuinos por entidad, el
+resampleo con reemplazo (`bootstrap=True` por defecto) deja a algunos
+árboles del ensamble sin ver ningún ejemplo de una clase, y el sorteo de
+features por split (`max_features="sqrt"` por defecto) puede excluir por
+pura casualidad la señal casi perfecta que sí tenemos (`/Producer`,
+codificado one-hot en unas pocas columnas). Verificado por
+leave-one-out sobre el corpus real: con los valores por defecto, algunos
+documentos genuinos daban apenas 0.5-0.6 de confianza (y en una prueba
+similar, un documento terminó mal clasificado); con `bootstrap=False` y
+`max_features=None`, los mismos documentos dieron ≥0.88 sin ningún error.
+Cada árbol ve todas las muestras y todas las features disponibles — con
+tan pocos datos, la ganancia de reducir varianza vía muestreo aleatorio
+no compensa el ruido que introduce.
+
 ---
 
 ## 8. Explicabilidad (`domain/explainability/`, `application/explainability/`)

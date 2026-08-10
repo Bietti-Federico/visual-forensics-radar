@@ -5,6 +5,23 @@ during `fit` (e.g. a producer string from an entity outside the training
 set) rather than raising — exactly the graceful degradation wanted here: an
 unfamiliar document should read as low-confidence across every known class,
 not crash.
+
+`bootstrap=False`/`max_features=None`, not sklearn's defaults: this
+platform's whole operating point is a handful of real documents per entity
+(see `docs/DOCUMENTACION.md`), and `RandomForestClassifier`'s default
+per-tree bootstrap resampling is actively harmful at that scale — resampling
+2-3 rows per class with replacement regularly leaves a tree with zero
+examples of some class, and `max_features="sqrt"` can similarly exclude the
+one genuinely near-perfect signal (the `/Producer` string, one-hot encoded
+into a handful of columns) from a given split's candidate features purely
+by chance. Turning both off means every tree sees every available example
+and every feature, which on this few-hundred-features/few-dozen-rows
+regime just means the ensemble reliably finds the real, deterministic
+split instead of adding sampling noise a dataset this size can't afford.
+Confirmed via leave-one-out over the real training corpus: default
+settings only reached ~0.5-0.6 confidence on some genuine documents (once,
+misclassifying one entirely); these settings reached ≥0.88 on all of them
+with no misclassifications.
 """
 
 from __future__ import annotations
@@ -32,7 +49,12 @@ class RandomForestEntityClassifier:
     ) -> None:
         self._vectorizer = DictVectorizer(sparse=False)
         matrix = self._vectorizer.fit_transform([dict(vector) for vector in feature_vectors])
-        self._estimator = RandomForestClassifier(random_state=self._random_state)
+        self._estimator = RandomForestClassifier(
+            random_state=self._random_state,
+            n_estimators=200,
+            max_features=None,
+            bootstrap=False,
+        )
         self._estimator.fit(matrix, list(entity_labels))
 
     def predict(self, feature_vector: Mapping[str, FeatureValue]) -> EntityPrediction:

@@ -64,7 +64,16 @@ def test_train_and_identify_recognizes_entity_by_producer() -> None:
 
 
 def test_sample_weight_shifts_confidence_toward_upweighted_entity() -> None:
-    feature_sets = [_feature_set_for(_document("Ambiguous Producer", i)) for i in range(6)]
+    # Same `variant` (0) for every training document: with the classifier's
+    # current bootstrap=False/max_features=None settings (deliberately
+    # tuned to exploit any real signal reliably — see
+    # random_forest_entity_classifier.py's docstring), a *varying* variant
+    # would itself become a perfectly-separating leaked feature and the
+    # classifier would reach 100% confidence regardless of sample_weight,
+    # defeating this test's purpose. Identical feature vectors across both
+    # classes mean the only thing that can break the tie is sample_weight's
+    # row duplication.
+    feature_sets = [_feature_set_for(_document("Ambiguous Producer", 0)) for _ in range(6)]
     entity_labels = ["ANSES"] * 3 + ["LA_RIOJA"] * 3
 
     baseline_classifiers = default_entity_classifiers()
@@ -76,7 +85,7 @@ def test_sample_weight_shifts_confidence_toward_upweighted_entity() -> None:
         feature_sets, entity_labels, sample_weight=sample_weight
     )
 
-    held_out = _feature_set_for(_document("Ambiguous Producer", 50))
+    held_out = _feature_set_for(_document("Ambiguous Producer", 0))
     baseline_confidence = (
         IdentifyEntityUseCase(baseline_classifiers)
         .execute(held_out)
