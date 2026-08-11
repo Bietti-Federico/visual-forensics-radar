@@ -24,7 +24,7 @@
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
-    max-width: 960px;
+    max-width: 1040px;
     margin: 0 auto;
     padding: 2rem 1.25rem 4rem;
     color: var(--text);
@@ -73,15 +73,13 @@
   button:hover { filter: brightness(1.08); }
   button.secondary { background: transparent; color: var(--muted); border-color: var(--border); font-weight: 500; }
   button.small { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+  button:disabled { opacity: 0.5; cursor: default; filter: none; }
   input[type=text], select {
-    padding: 0.5rem 0.6rem;
-    margin-right: 0.5rem;
-    margin-bottom: 0.5rem;
+    padding: 0.4rem 0.5rem;
     border: 1px solid var(--border);
-    border-radius: 8px;
-    font-size: 0.9rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
   }
-  input[type=file] { margin-bottom: 0.5rem; }
   pre {
     background: #f7f8fa;
     padding: 1rem;
@@ -91,11 +89,12 @@
     font-size: 0.82rem;
     border: 1px solid var(--border);
   }
-  table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.88rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; font-size: 0.88rem; }
   td, th {
     border-bottom: 1px solid var(--border);
     padding: 0.5rem 0.6rem;
     text-align: left;
+    vertical-align: middle;
   }
   th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.02em; }
   .muted { color: var(--muted); font-size: 0.9rem; }
@@ -104,18 +103,51 @@
     align-items: center;
     gap: 0.4rem;
     font-weight: 700;
-    font-size: 1.4rem;
-    padding: 0.3rem 0.9rem;
+    padding: 0.15rem 0.6rem;
     border-radius: 999px;
+    font-size: 0.78rem;
   }
+  .badge.big { font-size: 1.4rem; padding: 0.3rem 0.9rem; }
   .risk-low  { color: var(--risk-low);  background: var(--risk-low-bg); }
   .risk-mid  { color: var(--risk-mid);  background: var(--risk-mid-bg); }
   .risk-high { color: var(--risk-high); background: var(--risk-high-bg); }
+  .badge-genuine { color: var(--risk-low); background: var(--risk-low-bg); }
+  .badge-fraud { color: var(--risk-high); background: var(--risk-high-bg); }
   .result-grid { display: grid; gap: 0.6rem; margin-top: 1rem; }
-  .result-row { display: flex; gap: 0.5rem; font-size: 0.92rem; }
+  .result-row { display: flex; gap: 0.5rem; font-size: 0.92rem; align-items: center; }
   .result-row .label { color: var(--muted); min-width: 6rem; }
   details summary { cursor: pointer; color: var(--accent); font-size: 0.88rem; margin-top: 1rem; }
-  .actions-row { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; }
+  .entity-group { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 0.6rem; overflow: hidden; }
+  .entity-group summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 0.7rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #fafbfc;
+    font-weight: 600;
+    font-size: 0.92rem;
+    margin: 0;
+  }
+  .entity-group summary::-webkit-details-marker { display: none; }
+  .entity-group summary .counts { font-weight: 400; color: var(--muted); font-size: 0.85rem; }
+  .entity-group table { margin: 0; }
+  .entity-group td, .entity-group th { padding: 0.45rem 1rem; }
+  .actions-cell { display: flex; gap: 0.4rem; align-items: center; }
+  .edit-row select, .edit-row input { margin-right: 0.3rem; }
+  .pending-item {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto auto;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+  }
+  .pending-item:last-child { border-bottom: none; }
+  .pending-filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pending-item .muted { font-size: 0.78rem; }
 </style>
 </head>
 <body>
@@ -139,26 +171,19 @@
 <section class="card">
   <h2>Corpus de entrenamiento</h2>
   <div id="corpus-summary" class="muted">Cargando…</div>
-  <table id="corpus-table"></table>
-  <table id="files-table"></table>
+  <div id="corpus-groups"></div>
 </section>
 
 <section class="card">
-  <h2>Agregar documento de entrenamiento</h2>
-  <p class="muted">La entidad se sugiere automáticamente al elegir el archivo. Para una entidad nueva (o si la sugerencia no es confiable), escribila a mano.</p>
-  <div>
-    <input id="upload-input" type="file" accept="application/pdf" />
+  <h2>Agregar documentos de entrenamiento</h2>
+  <p class="muted">Arrastrá uno o varios PDFs. Para cada uno se sugiere automáticamente la entidad y si parece genuino o fraude — revisá y corregí antes de confirmar.</p>
+  <div id="upload-drop" class="drop">Arrastrá uno o varios PDFs acá, o hacé click para elegir</div>
+  <input id="upload-input" type="file" accept="application/pdf" multiple style="display:none" />
+  <div id="pending-list" style="margin-top:1rem"></div>
+  <div class="actions-row" id="pending-actions" style="display:none; margin-top:0.75rem;">
+    <button id="upload-all-btn">Confirmar todos</button>
+    <span id="pending-status" class="muted"></span>
   </div>
-  <div>
-    <input id="upload-entity" type="text" placeholder="Entidad (ej: ANSES)" />
-    <select id="upload-kind">
-      <option value="genuine">Genuino</option>
-      <option value="confirmed-fraud">Fraude confirmado</option>
-    </select>
-    <button id="upload-btn">Subir</button>
-  </div>
-  <div id="upload-suggestion" class="muted"></div>
-  <div id="upload-result" class="muted"></div>
 </section>
 
 <section class="card">
@@ -169,6 +194,17 @@
 </section>
 
 <script>
+let pendingFiles = []; // { id, file, entity, isGenuine, suggestedEntity, confidence, riskScore, status }
+let nextPendingId = 0;
+
+function riskClass(score) {
+  if (score >= 50) return 'risk-high';
+  if (score >= 25) return 'risk-mid';
+  return 'risk-low';
+}
+
+// ---------- Corpus browser ----------
+
 async function refreshCorpusSummary() {
   const [summaryRes, filesRes] = await Promise.all([
     fetch('/training-data/summary'),
@@ -180,20 +216,90 @@ async function refreshCorpusSummary() {
   const entities = Object.keys(summary.entities).sort();
   document.getElementById('corpus-summary').textContent =
     entities.length ? `${entities.length} entidad(es) en el corpus.` : 'Sin documentos todavía.';
-  const summaryTable = document.getElementById('corpus-table');
-  summaryTable.innerHTML = '<tr><th>Entidad</th><th>Genuinos</th><th>Fraude confirmado</th></tr>' +
-    entities.map(e => `<tr><td>${e}</td><td>${summary.entities[e].genuine}</td><td>${summary.entities[e].confirmed_fraud}</td></tr>`).join('');
 
-  const filesTable = document.getElementById('files-table');
-  filesTable.innerHTML = '<tr><th>Entidad</th><th>Tipo</th><th>Archivo</th><th></th></tr>' +
-    files.map(f => `<tr>
-      <td>${f.entity}</td>
-      <td>${f.is_genuine ? 'Genuino' : 'Fraude confirmado'}</td>
-      <td>${f.filename}</td>
-      <td><button data-entity="${f.entity}" data-filename="${f.filename}" data-genuine="${f.is_genuine}" class="delete-file-btn small secondary">Quitar</button></td>
-    </tr>`).join('');
-  filesTable.querySelectorAll('.delete-file-btn').forEach(btn => {
-    btn.addEventListener('click', () => deleteTrainingFile(btn.dataset.entity, btn.dataset.filename, btn.dataset.genuine === 'true'));
+  const groupsDiv = document.getElementById('corpus-groups');
+  groupsDiv.innerHTML = entities.map(entity => {
+    const counts = summary.entities[entity];
+    const entityFiles = files.filter(f => f.entity === entity)
+      .sort((a, b) => a.filename.localeCompare(b.filename));
+    const rows = entityFiles.map(f => renderFileRow(f, entities)).join('');
+    return `
+      <details class="entity-group">
+        <summary>
+          <span>${entity}</span>
+          <span class="counts">${counts.genuine} genuino(s) · ${counts.confirmed_fraud} fraude(s)</span>
+        </summary>
+        <table>
+          <tr><th>Archivo</th><th>Naturaleza</th><th></th></tr>
+          ${rows}
+        </table>
+      </details>
+    `;
+  }).join('') || '<p class="muted">Todavía no hay documentos cargados.</p>';
+
+  attachCorpusRowHandlers(entities);
+}
+
+function renderFileRow(f, allEntities) {
+  const natureBadge = f.is_genuine
+    ? '<span class="badge badge-genuine">Genuino</span>'
+    : '<span class="badge badge-fraud">Fraude</span>';
+  return `
+    <tr data-entity="${f.entity}" data-filename="${f.filename}" data-genuine="${f.is_genuine}">
+      <td class="pending-filename">${f.filename}</td>
+      <td>${natureBadge}</td>
+      <td class="actions-cell">
+        <button class="small secondary edit-file-btn">Editar</button>
+        <button class="small secondary delete-file-btn">Quitar</button>
+      </td>
+    </tr>
+  `;
+}
+
+function attachCorpusRowHandlers(allEntities) {
+  document.querySelectorAll('.delete-file-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = btn.closest('tr');
+      deleteTrainingFile(row.dataset.entity, row.dataset.filename, row.dataset.genuine === 'true');
+    });
+  });
+  document.querySelectorAll('.edit-file-btn').forEach(btn => {
+    btn.addEventListener('click', () => openEditRow(btn.closest('tr'), allEntities));
+  });
+}
+
+function openEditRow(row, allEntities) {
+  const entity = row.dataset.entity;
+  const filename = row.dataset.filename;
+  const isGenuine = row.dataset.genuine === 'true';
+  const datalistId = `known-entities-${Date.now()}`;
+  const entityOptions = allEntities.map(e =>
+    `<option value="${e}" ${e === entity ? 'selected' : ''}>${e}</option>`).join('');
+  row.innerHTML = `
+    <td colspan="3" class="edit-row">
+      <input type="text" class="edit-entity" list="${datalistId}" value="${entity}" style="width:11rem" />
+      <datalist id="${datalistId}">${entityOptions}</datalist>
+      <select class="edit-nature">
+        <option value="true" ${isGenuine ? 'selected' : ''}>Genuino</option>
+        <option value="false" ${!isGenuine ? 'selected' : ''}>Fraude confirmado</option>
+      </select>
+      <button class="small save-edit-btn">Guardar</button>
+      <button class="small secondary cancel-edit-btn">Cancelar</button>
+    </td>
+  `;
+  row.querySelector('.cancel-edit-btn').addEventListener('click', refreshCorpusSummary);
+  row.querySelector('.save-edit-btn').addEventListener('click', async () => {
+    const newEntity = row.querySelector('.edit-entity').value.trim();
+    const newIsGenuine = row.querySelector('.edit-nature').value === 'true';
+    if (!newEntity) return;
+    await fetch('/training-data/recategorize', {
+      method: 'POST',
+      body: new URLSearchParams({
+        entity, filename, is_genuine: String(isGenuine),
+        new_entity: newEntity, new_is_genuine: String(newIsGenuine),
+      }),
+    });
+    refreshCorpusSummary();
   });
 }
 
@@ -203,11 +309,7 @@ async function deleteTrainingFile(entity, filename, isGenuine) {
   refreshCorpusSummary();
 }
 
-function riskClass(score) {
-  if (score >= 50) return 'risk-high';
-  if (score >= 25) return 'risk-mid';
-  return 'risk-low';
-}
+// ---------- Verify ----------
 
 const COVERAGE_LABELS = {
   archivo_completo: 'archivo completo',
@@ -240,7 +342,7 @@ async function verifyFile(file) {
 
   resultDiv.innerHTML = `
     <div class="result-grid">
-      <div class="result-row"><span class="label">Riesgo</span> <span class="badge ${riskClass(data.puntaje_riesgo)}">${data.puntaje_riesgo}/100</span></div>
+      <div class="result-row"><span class="label">Riesgo</span> <span class="badge big ${riskClass(data.puntaje_riesgo)}">${data.puntaje_riesgo}/100</span></div>
       <div class="result-row"><span class="label">Entidad</span> ${entidades}</div>
       <div class="result-row"><span class="label">Firma</span> ${firmas}</div>
     </div>
@@ -249,63 +351,156 @@ async function verifyFile(file) {
   `;
 }
 
-const dropZone = document.getElementById('verify-drop');
+const verifyDropZone = document.getElementById('verify-drop');
 const verifyInput = document.getElementById('verify-input');
-dropZone.addEventListener('click', () => verifyInput.click());
+verifyDropZone.addEventListener('click', () => verifyInput.click());
 verifyInput.addEventListener('change', () => { if (verifyInput.files[0]) verifyFile(verifyInput.files[0]); });
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
-dropZone.addEventListener('drop', e => {
+verifyDropZone.addEventListener('dragover', e => { e.preventDefault(); verifyDropZone.classList.add('drag'); });
+verifyDropZone.addEventListener('dragleave', () => verifyDropZone.classList.remove('drag'));
+verifyDropZone.addEventListener('drop', e => {
   e.preventDefault();
-  dropZone.classList.remove('drag');
+  verifyDropZone.classList.remove('drag');
   if (e.dataTransfer.files[0]) verifyFile(e.dataTransfer.files[0]);
 });
 
-document.getElementById('upload-input').addEventListener('change', async () => {
-  const file = document.getElementById('upload-input').files[0];
-  const suggestionDiv = document.getElementById('upload-suggestion');
-  const entityInput = document.getElementById('upload-entity');
-  if (!file) return;
-  suggestionDiv.textContent = 'Sugiriendo entidad…';
-  const formData = new FormData();
-  formData.append('file', file);
-  const res = await fetch('/training-data/suggest-entity', { method: 'POST', body: formData });
-  if (!res.ok) {
-    suggestionDiv.textContent = 'No se pudo sugerir una entidad (¿archivo no es un PDF válido?).';
-    return;
-  }
-  const data = await res.json();
-  if (data.suggested_entity) {
-    entityInput.value = data.suggested_entity;
-    suggestionDiv.textContent = `Sugerida: ${data.suggested_entity} (${(data.confidence * 100).toFixed(0)}%). Editá si no es correcta o es una entidad nueva.`;
-  } else {
-    entityInput.value = '';
-    suggestionDiv.textContent = 'No hay modelo entrenado todavía (o ninguna entidad conocida) — escribí la entidad a mano.';
-  }
-});
+// ---------- Multi-file training upload ----------
 
-document.getElementById('upload-btn').addEventListener('click', async () => {
-  const entity = document.getElementById('upload-entity').value.trim();
-  const kind = document.getElementById('upload-kind').value;
-  const file = document.getElementById('upload-input').files[0];
-  const resultDiv = document.getElementById('upload-result');
-  if (!entity || !file) {
-    resultDiv.textContent = 'Completá la entidad y elegí un archivo.';
-    return;
+function renderPendingList() {
+  const listDiv = document.getElementById('pending-list');
+  const actionsDiv = document.getElementById('pending-actions');
+  actionsDiv.style.display = pendingFiles.length ? 'flex' : 'none';
+
+  listDiv.innerHTML = pendingFiles.map(item => {
+    if (item.status === 'analyzing') {
+      return `<div class="pending-item"><span class="pending-filename">${item.file.name}</span><span class="muted" style="grid-column:span 4">Analizando…</span></div>`;
+    }
+    if (item.status === 'done') {
+      return `<div class="pending-item"><span class="pending-filename">${item.file.name}</span><span class="muted" style="grid-column:span 4">✓ Subido</span></div>`;
+    }
+    if (item.status === 'error') {
+      return `<div class="pending-item"><span class="pending-filename">${item.file.name}</span><span class="muted" style="grid-column:span 3">${item.error}</span><button class="small secondary remove-pending-btn" data-id="${item.id}">Quitar</button></div>`;
+    }
+    const riskBadge = item.riskScore != null
+      ? `<span class="badge ${riskClass(item.riskScore)}">riesgo ${item.riskScore}</span>` : '';
+    return `
+      <div class="pending-item">
+        <span class="pending-filename" title="${item.file.name}">${item.file.name}</span>
+        <input type="text" class="pending-entity" data-id="${item.id}" value="${item.entity}" style="width:10rem" />
+        <select class="pending-nature" data-id="${item.id}">
+          <option value="true" ${item.isGenuine ? 'selected' : ''}>Genuino</option>
+          <option value="false" ${!item.isGenuine ? 'selected' : ''}>Fraude confirmado</option>
+        </select>
+        ${riskBadge}
+        <div>
+          <button class="small upload-one-btn" data-id="${item.id}">Subir</button>
+          <button class="small secondary remove-pending-btn" data-id="${item.id}">Quitar</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listDiv.querySelectorAll('.pending-entity').forEach(el => {
+    el.addEventListener('input', () => {
+      const item = pendingFiles.find(p => p.id == el.dataset.id);
+      if (item) item.entity = el.value;
+    });
+  });
+  listDiv.querySelectorAll('.pending-nature').forEach(el => {
+    el.addEventListener('change', () => {
+      const item = pendingFiles.find(p => p.id == el.dataset.id);
+      if (item) item.isGenuine = el.value === 'true';
+    });
+  });
+  listDiv.querySelectorAll('.remove-pending-btn').forEach(el => {
+    el.addEventListener('click', () => {
+      pendingFiles = pendingFiles.filter(p => p.id != el.dataset.id);
+      renderPendingList();
+    });
+  });
+  listDiv.querySelectorAll('.upload-one-btn').forEach(el => {
+    el.addEventListener('click', () => uploadPendingItem(Number(el.dataset.id)));
+  });
+}
+
+async function addFilesToQueue(fileList) {
+  for (const file of fileList) {
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) continue;
+    const item = {
+      id: nextPendingId++, file, entity: '', isGenuine: true,
+      suggestedEntity: null, confidence: null, riskScore: null, status: 'analyzing',
+    };
+    pendingFiles.push(item);
+    renderPendingList();
+
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await fetch('/training-data/suggest-entity', { method: 'POST', body: formData });
+      if (!res.ok) {
+        item.status = 'error';
+        item.error = 'No se pudo analizar (¿es un PDF válido?)';
+      } else {
+        const data = await res.json();
+        item.entity = data.suggested_entity || '';
+        item.isGenuine = data.suggested_genuine;
+        item.riskScore = data.risk_score;
+        item.confidence = data.confidence;
+        item.status = 'pending';
+      }
+    } catch (e) {
+      item.status = 'error';
+      item.error = 'Error de red';
+    }
+    renderPendingList();
   }
+}
+
+async function uploadPendingItem(id) {
+  const item = pendingFiles.find(p => p.id === id);
+  if (!item || !item.entity) return;
   const formData = new FormData();
-  formData.append('entity', entity);
-  formData.append('file', file);
-  const endpoint = kind === 'genuine' ? '/training-data/genuine' : '/training-data/confirmed-fraud';
+  formData.append('entity', item.entity);
+  formData.append('file', item.file);
+  const endpoint = item.isGenuine ? '/training-data/genuine' : '/training-data/confirmed-fraud';
   const res = await fetch(endpoint, { method: 'POST', body: formData });
-  if (!res.ok) {
-    resultDiv.textContent = `Error: ${res.status} ${await res.text()}`;
-    return;
+  if (res.ok) {
+    item.status = 'done';
+    refreshCorpusSummary();
+  } else {
+    item.status = 'error';
+    item.error = `Error ${res.status}`;
   }
-  const data = await res.json();
-  resultDiv.textContent = `Guardado: ${data.saved_to}`;
-  refreshCorpusSummary();
+  renderPendingList();
+  setTimeout(() => {
+    pendingFiles = pendingFiles.filter(p => p.id !== id || p.status !== 'done');
+    renderPendingList();
+  }, 1500);
+}
+
+async function uploadAllPending() {
+  const statusSpan = document.getElementById('pending-status');
+  const toUpload = pendingFiles.filter(p => p.status === 'pending' && p.entity);
+  statusSpan.textContent = `Subiendo ${toUpload.length}…`;
+  for (const item of toUpload) {
+    await uploadPendingItem(item.id);
+  }
+  statusSpan.textContent = '';
+}
+
+const uploadDropZone = document.getElementById('upload-drop');
+const uploadInput = document.getElementById('upload-input');
+uploadDropZone.addEventListener('click', () => uploadInput.click());
+uploadInput.addEventListener('change', () => { addFilesToQueue(uploadInput.files); uploadInput.value = ''; });
+uploadDropZone.addEventListener('dragover', e => { e.preventDefault(); uploadDropZone.classList.add('drag'); });
+uploadDropZone.addEventListener('dragleave', () => uploadDropZone.classList.remove('drag'));
+uploadDropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadDropZone.classList.remove('drag');
+  addFilesToQueue(e.dataTransfer.files);
 });
+document.getElementById('upload-all-btn').addEventListener('click', uploadAllPending);
+
+// ---------- Retrain ----------
 
 document.getElementById('retrain-btn').addEventListener('click', async () => {
   const resultPre = document.getElementById('retrain-result');

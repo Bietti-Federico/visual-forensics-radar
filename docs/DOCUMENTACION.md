@@ -396,13 +396,14 @@ entidad.
 |---|---|
 | `GET /` | Sirve el frontend estático. |
 | `POST /verify` | Sube un PDF, corre todo el pipeline en memoria, devuelve el JSON completo **en español** (keys y textos — ver abajo). `422` si no es un PDF legible. |
-| `POST /training-data/suggest-entity` | Corre el clasificador actual sobre un archivo y sugiere la entidad más probable — para precargar el campo al subir un documento nuevo, sin que alguien tenga que saber (o escribir bien) el nombre de la entidad. |
+| `POST /training-data/suggest-entity` | Corre el pipeline completo de scoring (lo mismo que `/verify`) sobre un archivo y sugiere entidad, confianza, `risk_score`, y si parece genuino o fraude confirmado (`risk_score < 50` ⇒ genuino) — para precargar el formulario de carga sin que alguien tenga que ya saber la respuesta. Es una sugerencia editable en ambos campos, nunca un veredicto: una entidad nueva no tiene clasificador que la reconozca, y "genuino/fraude" es un umbral sobre el mismo risk score que ve `/verify`, no una clasificación con ground truth. |
 | `POST /training-data/genuine` | Sube un documento genuino a `training_corpus/genuine/<entidad>/`. No reentrena. |
 | `POST /training-data/confirmed-fraud` | Igual, bajo `confirmed_fraud/`. |
 | `GET /training-data/summary` | Conteos agregados por entidad. |
 | `GET /training-data/files` | Listado de archivos individuales (entidad, tipo, nombre). |
 | `DELETE /training-data/genuine/{entidad}/{archivo}` | Elimina un archivo genuino. `404` si no existe. |
 | `DELETE /training-data/confirmed-fraud/{entidad}/{archivo}` | Igual, para fraude confirmado. |
+| `POST /training-data/recategorize` | Mueve un archivo ya cargado a otra entidad y/o naturaleza (form fields: `entity`, `filename`, `is_genuine` actuales + `new_entity`, `new_is_genuine`) — para corregir una sugerencia equivocada sin borrar y volver a subir el archivo a mano. Si el destino es idéntico al origen, es un no-op (no reescribe el archivo). `404` si el archivo original no existe. |
 | `POST /retrain` | Reentrena todo el corpus, sobreescribe el modelo, recarga en memoria — sin reiniciar el proceso. |
 
 **Seguridad de rutas**: tanto la entidad como el nombre de archivo se
@@ -479,14 +480,27 @@ log aunque nada más lo muestre.
 ### Frontend (`static/index.html`)
 
 Un solo archivo HTML+JS vanilla, sin build, servido por el mismo backend.
-Tres secciones: **Verificar** (drag-and-drop, muestra el resultado
-legible y el JSON crudo completo en un `<details>`, para depurar
-exactamente lo que recibiría un sistema consumidor); **Corpus** (tabla
-agregada por entidad + tabla de archivos individuales con botón "Quitar");
-**Agregar documento de entrenamiento** (la entidad es un campo de texto
-libre, no un dropdown fijo, pero se precompleta automáticamente al elegir
-el archivo vía `suggest-entity` — editable, para una entidad nueva o una
-sugerencia de baja confianza).
+Cuatro secciones:
+
+- **Verificar**: drag-and-drop, muestra el resultado legible y el JSON
+  crudo completo en un `<details>`, para depurar exactamente lo que
+  recibiría un sistema consumidor.
+- **Corpus**: agrupado por entidad en bloques colapsables (`<details>`
+  por entidad, con el conteo de genuinos/fraude en el encabezado) en vez
+  de una única tabla plana — con pocos documentos ya era difícil de
+  seguir. Cada archivo tiene botones "Editar" (cambia entidad y/o
+  naturaleza in-place llamando a `/training-data/recategorize`, con la
+  entidad como texto libre con autocompletado de las entidades ya
+  conocidas) y "Quitar".
+- **Agregar documentos de entrenamiento**: acepta arrastrar **varios**
+  PDFs a la vez. Cada archivo entra a una cola donde, apenas se suelta,
+  se le pide a `suggest-entity` una sugerencia de entidad *y* de
+  naturaleza (genuino/fraude, según si el `risk_score` del pipeline
+  completo supera 50) — ambas editables antes de confirmar, fila por
+  fila o todas juntas con "Confirmar todos". La entidad sigue siendo
+  texto libre (no un dropdown fijo), porque agregar una entidad nueva no
+  debe necesitar ningún cambio de código.
+- **Reentrenar**: sin cambios respecto a antes.
 
 ### Ejecución
 

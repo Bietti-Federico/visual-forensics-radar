@@ -225,13 +225,85 @@ def test_delete_missing_file_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_recategorize_moves_file_to_new_entity_and_nature(client: TestClient) -> None:
+    upload = client.post(
+        "/training-data/genuine",
+        data={"entity": "ANSES"},
+        files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    filename = Path(upload.json()["saved_to"]).name
+
+    response = client.post(
+        "/training-data/recategorize",
+        data={
+            "entity": "ANSES",
+            "filename": filename,
+            "is_genuine": "true",
+            "new_entity": "MUNICIPALIDAD_DE_JUJUY",
+            "new_is_genuine": "false",
+        },
+    )
+    assert response.status_code == 200
+    new_path = Path(response.json()["saved_to"])
+    assert new_path.is_file()
+    assert new_path.parent.name == "MUNICIPALIDAD_DE_JUJUY"
+    assert new_path.parent.parent.name == "confirmed_fraud"
+
+    summary = client.get("/training-data/summary").json()
+    assert summary["entities"] == {"MUNICIPALIDAD_DE_JUJUY": {"genuine": 0, "confirmed_fraud": 1}}
+
+
+def test_recategorize_with_no_actual_change_does_not_duplicate_file(client: TestClient) -> None:
+    upload = client.post(
+        "/training-data/genuine",
+        data={"entity": "ANSES"},
+        files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    filename = Path(upload.json()["saved_to"]).name
+
+    response = client.post(
+        "/training-data/recategorize",
+        data={
+            "entity": "ANSES",
+            "filename": filename,
+            "is_genuine": "true",
+            "new_entity": "ANSES",
+            "new_is_genuine": "true",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["saved_to"].endswith(filename)
+
+    files = client.get("/training-data/files").json()["files"]
+    assert len(files) == 1
+    assert files[0]["filename"] == filename
+
+
+def test_recategorize_missing_file_returns_404(client: TestClient) -> None:
+    response = client.post(
+        "/training-data/recategorize",
+        data={
+            "entity": "ANSES",
+            "filename": "does_not_exist.pdf",
+            "is_genuine": "true",
+            "new_entity": "ANSES",
+            "new_is_genuine": "false",
+        },
+    )
+    assert response.status_code == 404
+
+
 def test_suggest_entity_with_no_trained_model_returns_none(client: TestClient) -> None:
     response = client.post(
         "/training-data/suggest-entity",
         files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")},
     )
     assert response.status_code == 200
-    assert response.json() == {"suggested_entity": None, "confidence": None}
+    body = response.json()
+    assert body["suggested_entity"] is None
+    assert body["confidence"] is None
+    assert isinstance(body["risk_score"], int)
+    assert isinstance(body["suggested_genuine"], bool)
 
 
 def test_suggest_entity_rejects_non_pdf(client: TestClient) -> None:

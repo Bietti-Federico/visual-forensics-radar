@@ -34,12 +34,6 @@ from fastapi.staticfiles import StaticFiles
 from pdf_forensics.application.document_scoring.score_document_use_case import (
     ScoreDocumentUseCase,
 )
-from pdf_forensics.application.entity_identification.identify_entity_use_case import (
-    IdentifyEntityUseCase,
-)
-from pdf_forensics.application.feature_extraction.extract_features_use_case import (
-    FeatureExtractionUseCase,
-)
 from pdf_forensics.application.model_persistence.load_trained_models_use_case import (
     LoadTrainedModelsUseCase,
 )
@@ -51,7 +45,6 @@ from pdf_forensics.domain.pdf.errors import NotAPdfError, UnrecoverableStructure
 from pdf_forensics.infrastructure.training_corpus.filesystem_training_corpus_reader import (
     read_training_corpus_files,
 )
-from pdf_forensics.plugins.features import default_feature_extractors
 from pdf_forensics_api.config import get_model_store_path, get_training_corpus_dir
 from pdf_forensics_api.logging_config import configure_logging
 from pdf_forensics_api.serialization import serialize_scoring_result
@@ -164,29 +157,42 @@ async def verify(request: Request, file: UploadFile = File(...)) -> dict[str, An
     return serialize_scoring_result(result)
 
 
+#: Above this, a training upload is suggested as confirmed-fraud rather
+#: than genuine — matches the frontend's own "risk-high" cutoff, so the
+#: suggestion agrees with the color the user would see verifying the same
+#: file. A suggestion only, never binding — see `suggest_entity` below.
+_SUGGEST_FRAUD_RISK_THRESHOLD = 50
+
+
 @app.post("/training-data/suggest-entity")
 async def suggest_entity(
     request: Request, file: UploadFile = File(...)  # noqa: B008
 ) -> dict[str, Any]:
-    """Entities are meant to scale purely by uploading documents, without
-    someone having to already know (or type correctly) which entity a new
-    file belongs to. Runs the currently loaded entity classifier against an
-    uploaded file and returns its top guess, for the frontend to pre-fill
-    the training-upload entity field — still editable, since a genuinely
-    new entity (or one not confident yet) has no classifier to guess it."""
+    """Neither the entity nor genuine/confirmed-fraud is meant to require
+    someone to already know the right answer before uploading. Runs the
+    full scoring pipeline (same as `/verify`) against an uploaded file and
+    returns its best guess at both, for the frontend to pre-fill the
+    training-upload form — still editable either way, since a genuinely
+    new entity has no classifier to guess it from, and a risk-score-based
+    genuine/fraud guess is exactly that: a guess, not a verdict."""
     pdf_bytes = await _read_upload(file)
+    use_case = ScoreDocumentUseCase(
+        request.app.state.entity_classifiers, request.app.state.per_entity
+    )
     try:
-        document = ParsePdfUseCase().execute(pdf_bytes)
+        result = use_case.execute(pdf_bytes)
     except (NotAPdfError, UnrecoverableStructureError) as exc:
         raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
 
-    feature_set = FeatureExtractionUseCase(default_feature_extractors()).execute(document)
-    entity_report = IdentifyEntityUseCase(request.app.state.entity_classifiers).execute(feature_set)
-    if not entity_report.predictions:
-        return {"suggested_entity": None, "confidence": None}
-
-    top = entity_report.predictions[0]
-    return {"suggested_entity": top.predicted_entity, "confidence": top.confidence}
+    predictions = result.entity_report.predictions
+    top = predictions[0] if predictions else None
+    risk_score = result.risk_report.risk_score
+    return {
+        "suggested_entity": top.predicted_entity if top else None,
+        "confidence": top.confidence if top else None,
+        "risk_score": risk_score,
+        "suggested_genuine": risk_score < _SUGGEST_FRAUD_RISK_THRESHOLD,
+    }
 
 
 def _training_file_dir(entity: str, *, is_genuine: bool) -> Path:
@@ -283,6 +289,39 @@ def delete_genuine(entity: str, filename: str) -> dict[str, Any]:
 def delete_confirmed_fraud(entity: str, filename: str) -> dict[str, Any]:
     _delete_training_file(entity, filename, is_genuine=False)
     return {"deleted": True}
+
+
+@app.post("/training-data/recategorize")
+def recategorize_training_file(
+    entity: str = Form(...),
+    filename: str = Form(...),
+    is_genuine: bool = Form(...),
+    new_entity: str = Form(...),
+    new_is_genuine: bool = Form(...),
+) -> dict[str, Any]:
+    """Moves an already-uploaded file to a different entity and/or
+    genuine/confirmed-fraud bucket — for correcting a suggestion (entity
+    or nature) after the fact, without deleting and re-uploading the file
+    by hand. Doesn't retrain — same as upload/delete, a stale model still
+    reflects the old categorization until the next `/retrain`."""
+    safe_filename = _sanitize_path_component(filename, default="upload.pdf")
+    old_path = _training_file_dir(entity, is_genuine=is_genuine) / safe_filename
+    if not old_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    prospective_path = _training_file_dir(new_entity, is_genuine=new_is_genuine) / safe_filename
+    if prospective_path == old_path:
+        # No actual change (e.g. saving the edit form without touching
+        # anything) — leave the file exactly as it is. Otherwise
+        # save-then-delete would see its own about-to-be-deleted file as
+        # a name collision and rename the file with a random suffix.
+        return {"saved_to": str(old_path)}
+
+    pdf_bytes = old_path.read_bytes()
+    old_path.unlink()
+    new_path = _save_training_file(pdf_bytes, filename, new_entity, is_genuine=new_is_genuine)
+    logger.info("Recategorizado: %s -> %s", old_path, new_path)
+    return {"saved_to": str(new_path)}
 
 
 @app.post("/retrain")
