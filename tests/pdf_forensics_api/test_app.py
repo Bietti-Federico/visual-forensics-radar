@@ -370,3 +370,55 @@ def test_verify_with_entity_override_replaces_the_prediction(client: TestClient)
     # The classifier only ever saw ANSES — it has no structural confidence
     # for JUJUY at all, so this is 0.0, not an artificial 1.0.
     assert body["entidades_predichas"][0]["confianza"] == 0.0
+
+
+def test_analisis_returns_only_the_risk_score(client: TestClient) -> None:
+    response = client.post(
+        "/analisis", files={"file": ("doc.pdf", _pdf_bytes(), "application/pdf")}
+    )
+    assert response.status_code == 200
+    assert set(response.json()) == {"puntaje_riesgo"}
+    assert isinstance(response.json()["puntaje_riesgo"], int)
+
+
+def test_analisis_matches_verify_for_the_same_input(client: TestClient) -> None:
+    for i in range(3):
+        client.post(
+            "/training-data/genuine",
+            data={"entity": "ANSES"},
+            files={"file": (f"doc{i}.pdf", _pdf_bytes(i), "application/pdf")},
+        )
+    client.post("/retrain")
+
+    verify_body = client.post(
+        "/verify", files={"file": ("doc.pdf", _pdf_bytes(0), "application/pdf")}
+    ).json()
+    analisis_body = client.post(
+        "/analisis", files={"file": ("doc.pdf", _pdf_bytes(0), "application/pdf")}
+    ).json()
+    assert analisis_body["puntaje_riesgo"] == verify_body["puntaje_riesgo"]
+
+
+def test_analisis_accepts_entity_override(client: TestClient) -> None:
+    for i in range(3):
+        client.post(
+            "/training-data/genuine",
+            data={"entity": "ANSES"},
+            files={"file": (f"doc{i}.pdf", _pdf_bytes(i), "application/pdf")},
+        )
+    client.post("/retrain")
+
+    response = client.post(
+        "/analisis",
+        data={"entity": "MUNICIPALIDAD_DE_JUJUY"},
+        files={"file": ("doc.pdf", _pdf_bytes(0), "application/pdf")},
+    )
+    assert response.status_code == 200
+    assert set(response.json()) == {"puntaje_riesgo"}
+
+
+def test_analisis_rejects_non_pdf(client: TestClient) -> None:
+    response = client.post(
+        "/analisis", files={"file": ("doc.pdf", b"not a pdf", "application/pdf")}
+    )
+    assert response.status_code == 422

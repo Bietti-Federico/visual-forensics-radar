@@ -13,13 +13,24 @@ from __future__ import annotations
 
 import zlib
 
+# Caps decompression-bomb streams (a tiny compressed payload expanding to
+# gigabytes) from exhausting memory. Chosen well above any legitimate PDF
+# structural stream (xref/object streams are metadata, not media) while
+# still bounding worst-case memory use per stream.
+_MAX_DECOMPRESSED_BYTES = 100 * 1024 * 1024
+
 
 class FilterError(Exception):
     """Raised when Flate-decoding fails; callers catch this and record an anomaly."""
 
 
 def flate_decode(data: bytes) -> bytes:
+    decompressor = zlib.decompressobj()
     try:
-        return zlib.decompress(data)
+        result = decompressor.decompress(data, _MAX_DECOMPRESSED_BYTES)
+        if decompressor.unconsumed_tail:
+            raise FilterError(f"decompressed output exceeds the {_MAX_DECOMPRESSED_BYTES}-byte cap")
+        result += decompressor.flush()
     except zlib.error as exc:
         raise FilterError(str(exc)) from exc
+    return result

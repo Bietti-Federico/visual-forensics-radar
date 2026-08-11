@@ -19,6 +19,7 @@ if nothing else surfaces it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -32,6 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pdf_forensics.application.document_scoring.score_document_use_case import (
+    DocumentScoringResult,
     ScoreDocumentUseCase,
 )
 from pdf_forensics.application.model_persistence.load_trained_models_use_case import (
@@ -133,22 +135,17 @@ def _parse_or_422(pdf_bytes: bytes, *, filename: str | None) -> None:
         raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
 
 
-@app.post("/verify")
-async def verify(
-    request: Request,
-    file: UploadFile = File(...),  # noqa: B008
-    entity: str | None = Form(None),
-) -> dict[str, Any]:
-    """`entity`, if given, overrides the classifier's own guess entirely —
-    the entity identification model sometimes gets it wrong, and there's
-    no reason to force a retrain just to re-score one document against
-    the entity a human can already tell it actually is."""
+async def _run_verification(
+    request: Request, file: UploadFile, entity: str | None
+) -> DocumentScoringResult:
+    """Shared by `/verify` and `/analisis` — same scoring, same error
+    handling and logging, different response shape."""
     pdf_bytes = await _read_upload(file)
     use_case = ScoreDocumentUseCase(
         request.app.state.entity_classifiers, request.app.state.per_entity
     )
     try:
-        result = use_case.execute(pdf_bytes, entity_override=entity)
+        result = await asyncio.to_thread(use_case.execute, pdf_bytes, entity_override=entity)
     except (NotAPdfError, UnrecoverableStructureError) as exc:
         logger.warning("Verificación de %r falló: no es un PDF legible: %s", file.filename, exc)
         raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
@@ -163,7 +160,38 @@ async def verify(
         ),
         " (manual)" if entity else "",
     )
+    return result
+
+
+@app.post("/verify")
+async def verify(
+    request: Request,
+    file: UploadFile = File(...),  # noqa: B008
+    entity: str | None = Form(None),
+) -> dict[str, Any]:
+    """`entity`, if given, overrides the classifier's own guess entirely —
+    the entity identification model sometimes gets it wrong, and there's
+    no reason to force a retrain just to re-score one document against
+    the entity a human can already tell it actually is. Full diagnostic
+    detail (fingerprint, signatures, components, motivos) — for the
+    frontend and for debugging. For a document-upload pipeline that only
+    needs the number, see `/analisis`."""
+    result = await _run_verification(request, file, entity)
     return serialize_scoring_result(result)
+
+
+@app.post("/analisis")
+async def analisis(
+    request: Request,
+    file: UploadFile = File(...),  # noqa: B008
+    entity: str | None = Form(None),
+) -> dict[str, Any]:
+    """Same scoring as `/verify` (same optional `entity` override), but the
+    response is nothing more than the risk score — for a document-upload
+    pipeline that just needs a number to gate on, not the full diagnostic
+    breakdown `/verify` returns for a human."""
+    result = await _run_verification(request, file, entity)
+    return {"puntaje_riesgo": result.risk_report.risk_score}
 
 
 #: Above this, a training upload is suggested as confirmed-fraud rather
@@ -189,7 +217,7 @@ async def suggest_entity(
         request.app.state.entity_classifiers, request.app.state.per_entity
     )
     try:
-        result = use_case.execute(pdf_bytes)
+        result = await asyncio.to_thread(use_case.execute, pdf_bytes)
     except (NotAPdfError, UnrecoverableStructureError) as exc:
         raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
 

@@ -18,6 +18,8 @@ background data from the persisted bundle and rebuilding it lazily on load.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +36,18 @@ MODEL_STORE_SCHEMA_VERSION = "3.0.0"
 def save_bundle(path: str | Path, bundle: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"schema_version": MODEL_STORE_SCHEMA_VERSION, **bundle}, path)
+    # Write to a sibling temp file and atomically rename it into place, so a
+    # crash or a concurrent /retrain mid-write can never leave a truncated or
+    # half-written model store behind for a subsequent load to trip over.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        os.close(fd)
+        joblib.dump({"schema_version": MODEL_STORE_SCHEMA_VERSION, **bundle}, tmp_path)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def load_bundle(path: str | Path) -> dict[str, Any]:

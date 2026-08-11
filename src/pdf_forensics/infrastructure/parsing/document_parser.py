@@ -32,7 +32,11 @@ from pdf_forensics.infrastructure.parsing.trailer_resolver import walk_revision_
 from pdf_forensics.infrastructure.parsing.xref_stream_parser import parse_xref_stream
 from pdf_forensics.infrastructure.parsing.xref_table_parser import parse_xref_table
 
-_BRUTE_FORCE_OBJECT_PATTERN = re.compile(rb"(?<![0-9])(\d+)[ \t]+(\d+)[ \t]+obj\b")
+# Whitespace class matches the tokenizer's own WHITESPACE_BYTES (ISO
+# 32000-1 §7.2.2), not just space/tab — a "N G obj" separated by e.g. a
+# bare \r or \x0c is valid COS syntax and must still be found by this scan.
+_WS = rb"[\x00\t\n\x0c\r ]+"
+_BRUTE_FORCE_OBJECT_PATTERN = re.compile(rb"(?<![0-9])(\d+)" + _WS + rb"(\d+)" + _WS + rb"obj\b")
 _PDF_VERSION_PATTERN = re.compile(rb"%PDF-(\d\.\d)")
 
 
@@ -234,10 +238,13 @@ class PdfDocumentParser:
         anomalies: AnomalyCollector,
     ) -> dict[tuple[int, int], PdfObject]:
         objects: dict[tuple[int, int], PdfObject] = {}
+        recovery_index: dict[tuple[int, int], int] | None = None
         for entry in effective_entries.values():
             if entry.entry_type != XrefEntryType.IN_USE:
                 continue
-            obj = self._resolve_in_use_entry(data, object_parser, entry, anomalies)
+            obj, recovery_index = self._resolve_in_use_entry(
+                data, object_parser, entry, anomalies, recovery_index
+            )
             if obj is not None:
                 objects[(obj.obj_num, obj.generation)] = obj
         return objects
@@ -248,10 +255,11 @@ class PdfDocumentParser:
         object_parser: ObjectParser,
         entry: XrefEntry,
         anomalies: AnomalyCollector,
-    ) -> PdfObject | None:
+        recovery_index: dict[tuple[int, int], int] | None,
+    ) -> tuple[PdfObject | None, dict[tuple[int, int], int] | None]:
         obj, _ = object_parser.parse_indirect_object(entry.offset_or_stream_obj_num)
         if obj is not None and obj.obj_num == entry.obj_num and obj.generation == entry.generation:
-            return obj
+            return obj, recovery_index
 
         anomalies.record(
             AnomalyCode.XREF_OFFSET_MISMATCH,
@@ -262,14 +270,20 @@ class PdfDocumentParser:
             object_ref=PdfReference(entry.obj_num, entry.generation),
             byte_offset=entry.offset_or_stream_obj_num,
         )
-        pattern = re.compile(
-            rf"(?<![0-9]){entry.obj_num}[ \t]+{entry.generation}[ \t]+obj\b".encode("ascii")
-        )
-        match = pattern.search(data)
-        if match is None:
-            return None
-        recovered, _ = object_parser.parse_indirect_object(match.start())
-        return recovered
+        # Built lazily, once, on the first mismatch: a single whole-file scan
+        # indexing every "N G obj" occurrence, instead of re-scanning the file
+        # from scratch for each mismatched entry (which is O(entries * file
+        # size) on files with many broken offsets).
+        if recovery_index is None:
+            recovery_index = {}
+            for match in _BRUTE_FORCE_OBJECT_PATTERN.finditer(data):
+                key = (int(match.group(1)), int(match.group(2)))
+                recovery_index.setdefault(key, match.start())  # first occurrence wins
+        offset = recovery_index.get((entry.obj_num, entry.generation))
+        if offset is None:
+            return None, recovery_index
+        recovered, _ = object_parser.parse_indirect_object(offset)
+        return recovered, recovery_index
 
     def _expand_compressed_objects(
         self,

@@ -31,11 +31,17 @@ class SklearnClassifierPlugin:
         self._explainer: Any = None
 
     def fit(self, feature_vectors: Sequence[Mapping[str, float]], labels: Sequence[bool]) -> None:
+        target = [not label for label in labels]  # positive class = "manipulated"
+        if len(set(target)) < 2:
+            raise ValueError(
+                f"{self.model_id} requires both genuine and manipulated examples to fit; "
+                f"got only one class."
+            )
+
         self._vectorizer = DictVectorizer(sparse=False)
         matrix = self._vectorizer.fit_transform(list(feature_vectors))
-        target = [not label for label in labels]  # positive class = "manipulated"
 
-        self._estimator = self._build_estimator()
+        self._estimator = self._build_estimator(target)
         self._estimator.fit(matrix, target)
         self._explainer = self._build_explainer(self._estimator, matrix)
 
@@ -76,7 +82,7 @@ class SklearnClassifierPlugin:
             raise RuntimeError(f"{self.model_id} has not been fit yet.")
         return self._vectorizer.transform([dict(feature_vector)])
 
-    def _build_estimator(self) -> Any:
+    def _build_estimator(self, labels: Sequence[bool]) -> Any:
         raise NotImplementedError
 
     def _build_explainer(self, estimator: Any, background: Any) -> Any:

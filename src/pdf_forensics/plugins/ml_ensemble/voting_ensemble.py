@@ -6,6 +6,7 @@ SHAP is explicitly deferred for this model — same reasoning as
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier, VotingClassifier
@@ -18,12 +19,16 @@ from pdf_forensics.plugins.ml_ensemble._sklearn_classifier_base import SklearnCl
 class VotingEnsembleModel(SklearnClassifierPlugin):
     model_id = "voting_ensemble"
 
-    def _build_estimator(self) -> Any:
+    def __init__(self, random_state: int = 42) -> None:
+        super().__init__()
+        self._random_state = random_state
+
+    def _build_estimator(self, labels: Sequence[bool]) -> Any:
         estimators = [
-            ("random_forest", RandomForestClassifier(random_state=42)),
-            ("extra_trees", ExtraTreesClassifier(random_state=42)),
+            ("random_forest", RandomForestClassifier(random_state=self._random_state)),
+            ("extra_trees", ExtraTreesClassifier(random_state=self._random_state)),
             ("logistic_regression", LogisticRegression(max_iter=1000)),
-            ("xgboost", XGBClassifier(random_state=42, eval_metric="logloss")),
+            ("xgboost", XGBClassifier(random_state=self._random_state, eval_metric="logloss")),
         ]
         return VotingClassifier(estimators=estimators, voting="soft")
 

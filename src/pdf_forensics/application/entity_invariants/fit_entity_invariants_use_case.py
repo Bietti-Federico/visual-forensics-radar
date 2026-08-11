@@ -19,6 +19,7 @@ from typing import Any
 
 from pdf_forensics.domain.entity_invariants.learned_invariant import LearnedInvariant
 from pdf_forensics.domain.features.enums import FeatureType
+from pdf_forensics.domain.features.feature import Feature
 from pdf_forensics.domain.features.feature_set import FeatureSet
 
 #: Separator between a dict-valued feature's name and one of its keys in a
@@ -30,26 +31,33 @@ class FitEntityInvariantsUseCase:
     def execute(self, feature_sets: Sequence[FeatureSet]) -> tuple[LearnedInvariant, ...]:
         if not feature_sets:
             return ()
+        # `FeatureSet.by_name` is a linear scan; looking a name up per
+        # document per candidate feature (as the mining loops below do) would
+        # be O(names * documents * features). Indexing each document's
+        # features by name once, up front, makes every lookup below O(1).
+        by_document = [
+            {feature.name: feature for feature in feature_set} for feature_set in feature_sets
+        ]
         return tuple(
-            self._mine_boolean_invariants(feature_sets)
-            + self._mine_histogram_invariants(feature_sets)
+            self._mine_boolean_invariants(by_document)
+            + self._mine_histogram_invariants(by_document)
         )
 
     def _mine_boolean_invariants(
-        self, feature_sets: Sequence[FeatureSet]
+        self, by_document: Sequence[Mapping[str, Feature]]
     ) -> list[LearnedInvariant]:
         boolean_names = sorted(
             {
                 feature.name
-                for feature in feature_sets[0]
+                for feature in by_document[0].values()
                 if feature.value_type is FeatureType.BOOLEAN
             }
         )
         invariants: list[LearnedInvariant] = []
         for name in boolean_names:
             values: list[bool] = []
-            for feature_set in feature_sets:
-                feature = feature_set.by_name(name)
+            for document in by_document:
+                feature = document.get(name)
                 if feature is None or not isinstance(feature.value, bool):
                     values = []
                     break
@@ -59,16 +67,20 @@ class FitEntityInvariantsUseCase:
         return invariants
 
     def _mine_histogram_invariants(
-        self, feature_sets: Sequence[FeatureSet]
+        self, by_document: Sequence[Mapping[str, Feature]]
     ) -> list[LearnedInvariant]:
         dict_names = sorted(
-            {feature.name for feature in feature_sets[0] if feature.value_type is FeatureType.DICT}
+            {
+                feature.name
+                for feature in by_document[0].values()
+                if feature.value_type is FeatureType.DICT
+            }
         )
         invariants: list[LearnedInvariant] = []
         for name in dict_names:
             histograms: list[Mapping[str, Any]] = []
-            for feature_set in feature_sets:
-                feature = feature_set.by_name(name)
+            for document in by_document:
+                feature = document.get(name)
                 if feature is None or not isinstance(feature.value, Mapping):
                     histograms = []
                     break

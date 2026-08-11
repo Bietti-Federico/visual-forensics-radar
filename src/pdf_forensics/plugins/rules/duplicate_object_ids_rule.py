@@ -18,12 +18,12 @@ class DuplicateObjectIdsRule:
         if count <= 0:
             return None
 
+        verbo = "está definido" if count == 1 else "están definidos"
+        sustantivo = "número de objeto" if count == 1 else "números de objeto"
         return RuleFinding(
             rule_id=self.rule_id,
             severity=AnomalySeverity.WARNING,
             confidence=1.0,
-            explanation=(
-                f"{count} número(s) de objeto están definidos más de una vez en este archivo."
-            ),
+            explanation=(f"{count} {sustantivo} {verbo} más de una vez en este archivo."),
             references=("ISO 32000-1 §7.5.4",),
         )

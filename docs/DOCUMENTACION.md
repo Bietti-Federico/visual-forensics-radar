@@ -414,7 +414,8 @@ entidad.
 | Endpoint | Qué hace |
 |---|---|
 | `GET /` | Sirve el frontend estático. |
-| `POST /verify` | Sube un PDF, corre todo el pipeline en memoria, devuelve el JSON completo **en español** (keys y textos — ver abajo). `422` si no es un PDF legible. Campo opcional `entity` (form field): fuerza qué entidad usar para elegir detectores/invariantes/modelo, para cuando el clasificador se equivoca y no tiene sentido esperar a un reentrenamiento para volver a puntuar ese documento contra la entidad correcta. Ver más abajo qué cambia exactamente y qué no. |
+| `POST /verify` | Sube un PDF, corre todo el pipeline en memoria, devuelve el JSON completo **en español** (keys y textos — ver abajo). `422` si no es un PDF legible. Campo opcional `entity` (form field): fuerza qué entidad usar para elegir detectores/invariantes/modelo, para cuando el clasificador se equivoca y no tiene sentido esperar a un reentrenamiento para volver a puntuar ese documento contra la entidad correcta. Ver más abajo qué cambia exactamente y qué no. Pensado para el frontend y para depurar. |
+| `POST /analisis` | Mismo scoring que `/verify` (mismo campo opcional `entity`), pero la respuesta es únicamente `{"puntaje_riesgo": N}` — para el sistema real de carga de comprobantes, que sólo necesita el número para decidir, no el detalle completo. |
 | `POST /training-data/suggest-entity` | Corre el pipeline completo de scoring (lo mismo que `/verify`) sobre un archivo y sugiere entidad, confianza, `risk_score`, y si parece genuino o fraude confirmado (`risk_score < 50` ⇒ genuino) — para precargar el formulario de carga sin que alguien tenga que ya saber la respuesta. Es una sugerencia editable en ambos campos, nunca un veredicto: una entidad nueva no tiene clasificador que la reconozca, y "genuino/fraude" es un umbral sobre el mismo risk score que ve `/verify`, no una clasificación con ground truth. |
 | `POST /training-data/genuine` | Sube un documento genuino a `training_corpus/genuine/<entidad>/`. No reentrena. |
 | `POST /training-data/confirmed-fraud` | Igual, bajo `confirmed_fraud/`. |
@@ -554,6 +555,57 @@ Cuatro secciones:
 ```bash
 poetry run uvicorn pdf_forensics_api.app:app --host 0.0.0.0 --port 8000
 ```
+
+---
+
+## 14. Auditoría de hardening previa a revisión externa
+
+Pasada de endurecimiento sobre todo el código antes de someterlo a
+revisión externa. Cambios de comportamiento (no sólo estilo):
+
+- **XSS en el frontend**: toda interpolación de datos no confiables
+  (nombre de entidad, nombre de archivo, campo de firma, motivos) dentro
+  de `innerHTML` en `static/index.html` pasa ahora por un `escapeHtml()`
+  propio antes de insertarse en el DOM.
+- **`/verify`, `/analisis`, `/training-data/suggest-entity` ya no bloquean
+  el event loop**: el scoring (parseo, sklearn, SHAP, verificación
+  criptográfica) corre en un hilo aparte vía `asyncio.to_thread`, en vez
+  de ejecutarse de forma síncrona dentro de un handler `async def`.
+- **`StackingClassifier` ya no crashea en el mínimo documentado** (5
+  genuinos / 3 fraude): `cv` se calcula a partir del tamaño de la clase
+  minoritaria en vez de usar el default de sklearn (`cv=5`, que exige al
+  menos 5 ejemplos por clase).
+- **Ajuste de modelos con una sola clase da un error claro** en vez de un
+  `IndexError` opaco en `predict()` — `SklearnClassifierPlugin.fit()`
+  valida que haya ejemplos de ambas clases.
+- **`model_store.py` escribe de forma atómica**: `save_bundle()` escribe
+  a un archivo temporal y hace `os.replace()`, así un reentrenamiento
+  interrumpido a mitad de escritura nunca deja un `model_store.joblib`
+  corrupto.
+- **`FlateDecode` limita el tamaño de salida** (100 MB) para no ser
+  vulnerable a bombas de descompresión (un stream comprimido minúsculo
+  que se expande a varios GB).
+- **La reconstrucción por fuerza bruta de `document_parser.py` ya no es
+  O(objetos × tamaño de archivo)**: el escaneo `"N G obj"` de todo el
+  archivo se hace una sola vez (indexado por `(obj_num, generation)`), no
+  una vez por cada entrada de xref con offset roto.
+- Anomalías nuevas para condiciones antes silenciosas: un token numérico
+  ilegible (`MALFORMED_NUMBER_TOKEN`, antes se devolvía `0` sin dejar
+  rastro) y una tabla/stream de xref truncado antes de cubrir todas las
+  entradas declaradas (`XREF_TRUNCATED`).
+- **`Feature` con valor `dict` ahora es realmente hasheable**: los tres
+  extractores que producen features tipo `DICT` (histogram) pasan por
+  `make_feature()`, que envuelve el `dict` en `MappingProxyType` — antes
+  se prometía inmutabilidad vía `Mapping` pero se entregaba un `dict`
+  mutable.
+- Se agregaron tests dedicados para `RandomForestEntityClassifier`
+  (antes sin cobertura propia), para los umbrales de severidad
+  CRITICAL/WARNING de invariantes, para el bypass `force=True`, para el
+  mínimo documentado de `StackingClassifier`, y para la escritura atómica
+  de `model_store.py`.
+- `reportlab` (usado por los tests de firma digital) pasó a ser una
+  dependencia de desarrollo declarada en `pyproject.toml`, en vez de
+  asumirse presente en el entorno.
 
 ---
 

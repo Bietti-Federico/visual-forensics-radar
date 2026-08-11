@@ -7,6 +7,7 @@ against — the training batch itself (`background`, passed in by
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import shap
@@ -18,7 +19,7 @@ from pdf_forensics.plugins.ml_ensemble._sklearn_classifier_base import SklearnCl
 class LogisticRegressionModel(SklearnClassifierPlugin):
     model_id = "logistic_regression"
 
-    def _build_estimator(self) -> Any:
+    def _build_estimator(self, labels: Sequence[bool]) -> Any:
         return LogisticRegression(max_iter=1000)
 
     def _build_explainer(self, estimator: Any, background: Any) -> Any:

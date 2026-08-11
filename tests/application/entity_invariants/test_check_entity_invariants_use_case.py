@@ -9,6 +9,7 @@ from pdf_forensics.domain.entity_invariants.learned_invariant import LearnedInva
 from pdf_forensics.domain.features.enums import FeatureCategory, FeatureType
 from pdf_forensics.domain.features.feature import Feature
 from pdf_forensics.domain.features.feature_set import FeatureSet
+from pdf_forensics.domain.pdf.anomalies import AnomalySeverity
 
 
 def _feature(name: str, value: object, value_type: FeatureType) -> Feature:
@@ -101,6 +102,57 @@ def test_no_predictions_produces_no_finding() -> None:
     )
 
     assert finding is None
+
+
+def test_minority_of_violations_is_warning_severity() -> None:
+    invariants = [
+        LearnedInvariant("catalog.has_acroform", True),
+        LearnedInvariant("metadata.has_creator", False),
+        LearnedInvariant("metadata.has_mod_date", True),
+    ]
+    feature_set = _feature_set(
+        **{
+            "catalog.has_acroform": (False, FeatureType.BOOLEAN),  # violated
+            "metadata.has_creator": (False, FeatureType.BOOLEAN),  # matches
+            "metadata.has_mod_date": (True, FeatureType.BOOLEAN),  # matches
+        }
+    )
+
+    finding = CheckEntityInvariantsUseCase(invariants).execute(feature_set, _report("ANSES", 0.9))
+
+    assert finding is not None
+    assert finding.severity is AnomalySeverity.WARNING
+
+
+def test_majority_of_violations_is_critical_severity() -> None:
+    invariants = [
+        LearnedInvariant("catalog.has_acroform", True),
+        LearnedInvariant("metadata.has_creator", False),
+        LearnedInvariant("metadata.has_mod_date", True),
+    ]
+    feature_set = _feature_set(
+        **{
+            "catalog.has_acroform": (False, FeatureType.BOOLEAN),  # violated
+            "metadata.has_creator": (True, FeatureType.BOOLEAN),  # violated
+            "metadata.has_mod_date": (True, FeatureType.BOOLEAN),  # matches
+        }
+    )
+
+    finding = CheckEntityInvariantsUseCase(invariants).execute(feature_set, _report("ANSES", 0.9))
+
+    assert finding is not None
+    assert finding.severity is AnomalySeverity.CRITICAL
+
+
+def test_force_bypasses_the_confidence_gate() -> None:
+    invariants = [LearnedInvariant("catalog.has_acroform", True)]
+    feature_set = _feature_set(**{"catalog.has_acroform": (False, FeatureType.BOOLEAN)})
+
+    finding = CheckEntityInvariantsUseCase(invariants).execute(
+        feature_set, _report("ANSES", 0.5), force=True
+    )
+
+    assert finding is not None
 
 
 def test_histogram_derived_invariant_is_checked_against_dict_feature() -> None:

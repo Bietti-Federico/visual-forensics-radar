@@ -42,6 +42,8 @@ class AnomalyCode(Enum):
     UNSUPPORTED_FILTER = "unsupported_filter"
     BROKEN_PREV_CHAIN = "broken_prev_chain"
     FILTER_DECODE_FAILED = "filter_decode_failed"
+    MALFORMED_NUMBER_TOKEN = "malformed_number_token"
+    XREF_TRUNCATED = "xref_truncated"
 
 
 @dataclass(frozen=True, slots=True)

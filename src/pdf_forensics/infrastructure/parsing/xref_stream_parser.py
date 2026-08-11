@@ -8,7 +8,7 @@ stream object's own dictionary doubles as the trailer.
 
 from __future__ import annotations
 
-from pdf_forensics.domain.pdf.anomalies import AnomalyCollector
+from pdf_forensics.domain.pdf.anomalies import AnomalyCode, AnomalyCollector, AnomalySeverity
 from pdf_forensics.domain.pdf.document import Revision, XrefEntry, XrefEntryType
 from pdf_forensics.domain.pdf.objects import PdfArray, PdfNumber, PdfObject, PdfStream
 from pdf_forensics.infrastructure.parsing.stream_decoding import decode_stream
@@ -42,16 +42,28 @@ def parse_xref_stream(
     row_width = sum(widths)
     entries: dict[int, XrefEntry] = {}
     pos = 0
+    truncated = False
     for pair_index in range(0, len(index_pairs), 2):
         start = index_pairs[pair_index]
         count = index_pairs[pair_index + 1]
         for i in range(count):
             if row_width == 0 or pos + row_width > len(decoded):
+                truncated = True
                 break
             row = decoded[pos : pos + row_width]
             pos += row_width
             fields = _split_row(row, widths)
             entries[start + i] = _entry_from_row(start + i, fields)
+
+    if truncated:
+        anomalies.record(
+            AnomalyCode.XREF_TRUNCATED,
+            AnomalySeverity.WARNING,
+            f"Cross-reference stream at offset {offset} ended before all entries "
+            f"declared by /Index were present; {len(entries)} of "
+            f"{sum(index_pairs[1::2])} entries recovered.",
+            byte_offset=offset,
+        )
 
     return Revision(
         trailer=stream.dictionary, xref_entries=entries, xref_offset=offset, is_xref_stream=True

@@ -47,6 +47,13 @@ def parse_xref_table(
         for i in range(count):
             offset_tok = tokenizer.next_token(pos)
             if offset_tok.kind != TokenKind.NUMBER:
+                anomalies.record(
+                    AnomalyCode.XREF_TRUNCATED,
+                    AnomalySeverity.WARNING,
+                    f"Xref subsection starting at object {start} declared {count} "
+                    f"entries but ended after {i}; the rest are missing.",
+                    byte_offset=pos,
+                )
                 break
             gen_tok = tokenizer.next_token(offset_tok.end)
             type_tok = tokenizer.next_token(gen_tok.end)

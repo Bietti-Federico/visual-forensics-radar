@@ -34,3 +34,17 @@ def test_explain_raises_not_implemented() -> None:
 
 def test_model_id() -> None:
     assert StackingEnsembleModel().model_id == "stacking_ensemble"
+
+
+def test_fits_at_the_documented_minimum_training_size() -> None:
+    """5 genuine / 3 fraud is this platform's documented minimum training
+    size. sklearn's default cv=5 for StackingClassifier crashes here since
+    the minority class (3 fraud) can't support a 5-fold stratified split."""
+    vectors = [{"x": float(i)} for i in range(8)]
+    labels = [False] * 5 + [True] * 3
+
+    model = StackingEnsembleModel()
+    model.fit(vectors, labels)
+
+    prediction = model.predict({"x": 100.0})
+    assert prediction.predicted_label in (True, False)

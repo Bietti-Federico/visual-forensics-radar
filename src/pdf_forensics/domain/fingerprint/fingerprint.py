@@ -61,6 +61,11 @@ class PdfFingerprint:
         `font_hash` can never appear here today since it's always `None` — a
         `None == None` "match" would claim two documents are similar on a
         dimension neither fingerprint actually computed.
+
+        Forward-looking API: no current caller uses this yet (near-duplicate
+        detection across documents is planned but not built), kept here
+        rather than deleted since `PdfFingerprint` is exactly the domain type
+        such a feature would need.
         """
         return frozenset(
             name

@@ -8,6 +8,7 @@ native-build dependency; explicitly deferred, not faked.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import shap
@@ -23,7 +24,7 @@ class XGBoostModel(SklearnClassifierPlugin):
         super().__init__()
         self._random_state = random_state
 
-    def _build_estimator(self) -> Any:
+    def _build_estimator(self, labels: Sequence[bool]) -> Any:
         return XGBClassifier(random_state=self._random_state, eval_metric="logloss")
 
     def _build_explainer(self, estimator: Any, background: Any) -> Any:

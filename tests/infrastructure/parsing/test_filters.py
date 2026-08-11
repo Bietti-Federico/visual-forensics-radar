@@ -16,6 +16,14 @@ def test_flate_decode_raises_filter_error_on_garbage() -> None:
         flate_decode(b"not compressed data")
 
 
+def test_flate_decode_caps_decompression_bomb() -> None:
+    # A tiny compressed payload that expands to well past the module's cap —
+    # must raise, not exhaust memory decompressing it fully.
+    bomb = zlib.compress(b"\x00" * (200 * 1024 * 1024))
+    with pytest.raises(FilterError, match="exceeds"):
+        flate_decode(bomb)
+
+
 def test_predictor_none_passthrough() -> None:
     data = b"abcdef"
     assert apply_predictor(data, predictor=1) == data

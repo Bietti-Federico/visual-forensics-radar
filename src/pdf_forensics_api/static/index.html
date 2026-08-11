@@ -197,6 +197,15 @@
 let pendingFiles = []; // { id, file, entity, isGenuine, suggestedEntity, confidence, riskScore, status }
 let nextPendingId = 0;
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function riskClass(score) {
   if (score >= 50) return 'risk-high';
   if (score >= 25) return 'risk-mid';
@@ -226,7 +235,7 @@ async function refreshCorpusSummary() {
     return `
       <details class="entity-group">
         <summary>
-          <span>${entity}</span>
+          <span>${escapeHtml(entity)}</span>
           <span class="counts">${counts.genuine} genuino(s) · ${counts.confirmed_fraud} fraude(s)</span>
         </summary>
         <table>
@@ -245,8 +254,8 @@ function renderFileRow(f, allEntities) {
     ? '<span class="badge badge-genuine">Genuino</span>'
     : '<span class="badge badge-fraud">Fraude</span>';
   return `
-    <tr data-entity="${f.entity}" data-filename="${f.filename}" data-genuine="${f.is_genuine}">
-      <td class="pending-filename">${f.filename}</td>
+    <tr data-entity="${escapeHtml(f.entity)}" data-filename="${escapeHtml(f.filename)}" data-genuine="${f.is_genuine}">
+      <td class="pending-filename">${escapeHtml(f.filename)}</td>
       <td>${natureBadge}</td>
       <td class="actions-cell">
         <button class="small secondary edit-file-btn">Editar</button>
@@ -274,10 +283,10 @@ function openEditRow(row, allEntities) {
   const isGenuine = row.dataset.genuine === 'true';
   const datalistId = `known-entities-${Date.now()}`;
   const entityOptions = allEntities.map(e =>
-    `<option value="${e}" ${e === entity ? 'selected' : ''}>${e}</option>`).join('');
+    `<option value="${escapeHtml(e)}" ${e === entity ? 'selected' : ''}>${escapeHtml(e)}</option>`).join('');
   row.innerHTML = `
     <td colspan="3" class="edit-row">
-      <input type="text" class="edit-entity" list="${datalistId}" value="${entity}" style="width:11rem" />
+      <input type="text" class="edit-entity" list="${datalistId}" value="${escapeHtml(entity)}" style="width:11rem" />
       <datalist id="${datalistId}">${entityOptions}</datalist>
       <select class="edit-nature">
         <option value="true" ${isGenuine ? 'selected' : ''}>Genuino</option>
@@ -336,7 +345,7 @@ async function verifyFile(file, entityOverride) {
   if (entityOverride) formData.append('entity', entityOverride);
   const res = await fetch('/verify', { method: 'POST', body: formData });
   if (!res.ok) {
-    resultDiv.innerHTML = `<p class="risk-high">Error: ${res.status} ${await res.text()}</p>`;
+    resultDiv.innerHTML = `<p class="risk-high">Error: ${res.status} ${escapeHtml(await res.text())}</p>`;
     return;
   }
   const data = await res.json();
@@ -344,16 +353,16 @@ async function verifyFile(file, entityOverride) {
 
   const currentEntity = data.entidades_predichas[0] ? data.entidades_predichas[0].entidad_predicha : '';
   const entidades = data.entidades_predichas.map(p =>
-    `${p.entidad_predicha} (${(p.confianza * 100).toFixed(0)}%)`).join(', ') || 'sin predicción';
+    `${escapeHtml(p.entidad_predicha)} (${(p.confianza * 100).toFixed(0)}%)`).join(', ') || 'sin predicción';
   const firmas = data.firmas.length
     ? data.firmas.map(s =>
-        `${s.campo}: íntegra=${s.digest_integro} válida=${s.criptograficamente_valida} cobertura=${COVERAGE_LABELS[s.cobertura] || s.cobertura}`
+        `${escapeHtml(s.campo)}: íntegra=${s.digest_integro} válida=${s.criptograficamente_valida} cobertura=${escapeHtml(COVERAGE_LABELS[s.cobertura] || s.cobertura)}`
       ).join('<br>')
     : 'sin firma embebida';
 
   const knownEntities = await getKnownEntities();
   const entityOptions = knownEntities.map(e =>
-    `<option value="${e}" ${e === currentEntity ? 'selected' : ''}>${e}</option>`).join('');
+    `<option value="${escapeHtml(e)}" ${e === currentEntity ? 'selected' : ''}>${escapeHtml(e)}</option>`).join('');
 
   resultDiv.innerHTML = `
     <div class="result-grid">
@@ -367,7 +376,7 @@ async function verifyFile(file, entityOverride) {
       <div class="result-row"><span class="label">Firma</span> ${firmas}</div>
     </div>
     <p style="margin-bottom:0.25rem"><strong>Motivos</strong></p>
-    <pre>${data.motivos.join('\n') || '(ninguno)'}</pre>
+    <pre>${data.motivos.map(escapeHtml).join('\n') || '(ninguno)'}</pre>
   `;
   document.getElementById('reverify-btn').addEventListener('click', () => {
     const chosen = document.getElementById('verify-entity-override').value;
@@ -396,20 +405,20 @@ function renderPendingList() {
 
   listDiv.innerHTML = pendingFiles.map(item => {
     if (item.status === 'analyzing') {
-      return `<div class="pending-item"><span class="pending-filename">${item.file.name}</span><span class="muted" style="grid-column:span 4">Analizando…</span></div>`;
+      return `<div class="pending-item"><span class="pending-filename">${escapeHtml(item.file.name)}</span><span class="muted" style="grid-column:span 4">Analizando…</span></div>`;
     }
     if (item.status === 'done') {
-      return `<div class="pending-item"><span class="pending-filename">${item.file.name}</span><span class="muted" style="grid-column:span 4">✓ Subido</span></div>`;
+      return `<div class="pending-item"><span class="pending-filename">${escapeHtml(item.file.name)}</span><span class="muted" style="grid-column:span 4">✓ Subido</span></div>`;
     }
     if (item.status === 'error') {
-      return `<div class="pending-item"><span class="pending-filename">${item.file.name}</span><span class="muted" style="grid-column:span 3">${item.error}</span><button class="small secondary remove-pending-btn" data-id="${item.id}">Quitar</button></div>`;
+      return `<div class="pending-item"><span class="pending-filename">${escapeHtml(item.file.name)}</span><span class="muted" style="grid-column:span 3">${escapeHtml(item.error)}</span><button class="small secondary remove-pending-btn" data-id="${item.id}">Quitar</button></div>`;
     }
     const riskBadge = item.riskScore != null
       ? `<span class="badge ${riskClass(item.riskScore)}">riesgo ${item.riskScore}</span>` : '';
     return `
       <div class="pending-item">
-        <span class="pending-filename" title="${item.file.name}">${item.file.name}</span>
-        <input type="text" class="pending-entity" data-id="${item.id}" value="${item.entity}" style="width:10rem" />
+        <span class="pending-filename" title="${escapeHtml(item.file.name)}">${escapeHtml(item.file.name)}</span>
+        <input type="text" class="pending-entity" data-id="${item.id}" value="${escapeHtml(item.entity)}" style="width:10rem" />
         <select class="pending-nature" data-id="${item.id}">
           <option value="true" ${item.isGenuine ? 'selected' : ''}>Genuino</option>
           <option value="false" ${!item.isGenuine ? 'selected' : ''}>Fraude confirmado</option>

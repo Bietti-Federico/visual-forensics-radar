@@ -224,6 +224,11 @@ class ObjectParser:
         try:
             value = Decimal(text)
         except InvalidOperation:
+            self._anomalies.record(
+                AnomalyCode.MALFORMED_NUMBER_TOKEN,
+                AnomalySeverity.WARNING,
+                f"Numeric token {text!r} could not be parsed; treated as 0.",
+            )
             value = Decimal(0)
         return PdfNumber(value=value, is_integer=b"." not in token.value)
 
