@@ -317,13 +317,23 @@ const COVERAGE_LABELS = {
   no_determinada: 'no determinada',
 };
 
-async function verifyFile(file) {
+let lastVerifiedFile = null;
+
+async function getKnownEntities() {
+  const res = await fetch('/training-data/summary');
+  const data = await res.json();
+  return Object.keys(data.entities).sort();
+}
+
+async function verifyFile(file, entityOverride) {
+  lastVerifiedFile = file;
   const resultDiv = document.getElementById('verify-result');
   const jsonPre = document.getElementById('verify-json');
   resultDiv.innerHTML = '<p class="muted">Analizando…</p>';
   jsonPre.textContent = '';
   const formData = new FormData();
   formData.append('file', file);
+  if (entityOverride) formData.append('entity', entityOverride);
   const res = await fetch('/verify', { method: 'POST', body: formData });
   if (!res.ok) {
     resultDiv.innerHTML = `<p class="risk-high">Error: ${res.status} ${await res.text()}</p>`;
@@ -332,6 +342,7 @@ async function verifyFile(file) {
   const data = await res.json();
   jsonPre.textContent = JSON.stringify(data, null, 2);
 
+  const currentEntity = data.entidades_predichas[0] ? data.entidades_predichas[0].entidad_predicha : '';
   const entidades = data.entidades_predichas.map(p =>
     `${p.entidad_predicha} (${(p.confianza * 100).toFixed(0)}%)`).join(', ') || 'sin predicción';
   const firmas = data.firmas.length
@@ -340,15 +351,28 @@ async function verifyFile(file) {
       ).join('<br>')
     : 'sin firma embebida';
 
+  const knownEntities = await getKnownEntities();
+  const entityOptions = knownEntities.map(e =>
+    `<option value="${e}" ${e === currentEntity ? 'selected' : ''}>${e}</option>`).join('');
+
   resultDiv.innerHTML = `
     <div class="result-grid">
       <div class="result-row"><span class="label">Riesgo</span> <span class="badge big ${riskClass(data.puntaje_riesgo)}">${data.puntaje_riesgo}/100</span></div>
-      <div class="result-row"><span class="label">Entidad</span> ${entidades}</div>
+      <div class="result-row"><span class="label">Entidad</span> ${entidades}${entityOverride ? ' <span class="muted">(elegida a mano)</span>' : ''}</div>
+      <div class="result-row">
+        <span class="label">¿Mal identificada?</span>
+        <select id="verify-entity-override">${entityOptions}</select>
+        <button class="small" id="reverify-btn">Re-verificar con esta entidad</button>
+      </div>
       <div class="result-row"><span class="label">Firma</span> ${firmas}</div>
     </div>
     <p style="margin-bottom:0.25rem"><strong>Motivos</strong></p>
     <pre>${data.motivos.join('\n') || '(ninguno)'}</pre>
   `;
+  document.getElementById('reverify-btn').addEventListener('click', () => {
+    const chosen = document.getElementById('verify-entity-override').value;
+    if (chosen && lastVerifiedFile) verifyFile(lastVerifiedFile, chosen);
+  });
 }
 
 const verifyDropZone = document.getElementById('verify-drop');

@@ -1,3 +1,5 @@
+import pytest
+
 from pdf_forensics.application.document_scoring.score_document_use_case import (
     ScoreDocumentUseCase,
 )
@@ -132,3 +134,81 @@ def test_unrecognized_entity_falls_back_to_empty_bundle() -> None:
 
     ml_component = next(c for c in result.risk_report.components if c.name == "ml_probability")
     assert ml_component.weight == 0.0
+
+
+def test_entity_override_replaces_the_classifier_prediction_entirely() -> None:
+    bundle = EntityModelBundle(
+        detectors=(),
+        models=(),
+        invariants=(),
+        genuine_count=5,
+        confirmed_fraud_count=5,
+        ml_ensemble_ready=True,
+    )
+    # The classifier would predict TEST_ENTITY; override points at a
+    # different entity that actually has a bundle configured for it.
+    use_case = ScoreDocumentUseCase(_trained_entity_classifiers(), {"OVERRIDE_ENTITY": bundle})
+
+    result = use_case.execute(
+        _document("Test Producer", 50).build(), entity_override="OVERRIDE_ENTITY"
+    )
+
+    assert len(result.entity_report) == 1
+    prediction = result.entity_report.predictions[0]
+    assert prediction.predicted_entity == "OVERRIDE_ENTITY"
+    # The classifier never saw OVERRIDE_ENTITY as a class, so it has no
+    # structural confidence for it — 0.0, not an artificial 1.0. See
+    # test_entity_consistency_reflects_classifiers_real_confidence_even_when_overridden
+    # for the case where the override matches the classifier's own guess.
+    assert prediction.confidence == 0.0
+    assert prediction.classifier_id == "manual_override"
+
+    ml_component = next(c for c in result.risk_report.components if c.name == "ml_probability")
+    assert ml_component.weight > 0.0
+
+
+def test_entity_consistency_reflects_classifiers_real_confidence_even_when_overridden() -> None:
+    # Overriding to the SAME entity the classifier already predicted
+    # should not artificially erase whatever structural confidence (or
+    # lack of it) the classifier actually computed for that entity —
+    # a document confirmed to be entity X that still doesn't structurally
+    # resemble X is itself a real signal, not something to discard.
+    classifiers = _trained_entity_classifiers()
+
+    unforced_result = ScoreDocumentUseCase(classifiers, {}).execute(
+        _document("Test Producer", 50).build()
+    )
+
+    forced_result = ScoreDocumentUseCase(classifiers, {}).execute(
+        _document("Test Producer", 50).build(), entity_override="TEST_ENTITY"
+    )
+
+    entity_consistency_unforced = next(
+        c for c in unforced_result.risk_report.components if c.name == "entity_consistency"
+    )
+    entity_consistency_forced = next(
+        c for c in forced_result.risk_report.components if c.name == "entity_consistency"
+    )
+    assert entity_consistency_forced.score == pytest.approx(entity_consistency_unforced.score)
+
+
+def test_entity_override_forces_invariant_check_past_the_confidence_gate() -> None:
+    # A learned invariant that the classifier's own (low) confidence would
+    # normally gate out of consideration should still fire once a human
+    # has confirmed the entity — that confirmation is exactly what removes
+    # "not confident which entity this is" as a reason to skip the check.
+    bundle = EntityModelBundle(
+        detectors=(),
+        models=(),
+        invariants=(LearnedInvariant("catalog.has_acroform", True),),
+        genuine_count=6,
+        confirmed_fraud_count=0,
+        ml_ensemble_ready=False,
+    )
+    # No classifiers at all: the "auto" prediction list is empty, so a
+    # plain (non-overridden) call has no entity to even gate on.
+    use_case = ScoreDocumentUseCase([], {"TEST_ENTITY": bundle})
+
+    result = use_case.execute(_document("Test Producer", 50).build(), entity_override="TEST_ENTITY")
+
+    assert any("formulario o firma digital" in reason for reason in result.explanation.reasons)

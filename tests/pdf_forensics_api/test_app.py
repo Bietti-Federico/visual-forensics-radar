@@ -347,3 +347,26 @@ def test_verify_uses_retrained_model(client: TestClient) -> None:
     body = response.json()
     assert len(body["entidades_predichas"]) == 1
     assert body["entidades_predichas"][0]["entidad_predicha"] == "ANSES"
+
+
+def test_verify_with_entity_override_replaces_the_prediction(client: TestClient) -> None:
+    for i in range(3):
+        client.post(
+            "/training-data/genuine",
+            data={"entity": "ANSES"},
+            files={"file": (f"doc{i}.pdf", _pdf_bytes(i), "application/pdf")},
+        )
+    client.post("/retrain")
+
+    response = client.post(
+        "/verify",
+        data={"entity": "MUNICIPALIDAD_DE_JUJUY"},
+        files={"file": ("doc.pdf", _pdf_bytes(0), "application/pdf")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["entidades_predichas"]) == 1
+    assert body["entidades_predichas"][0]["entidad_predicha"] == "MUNICIPALIDAD_DE_JUJUY"
+    # The classifier only ever saw ANSES — it has no structural confidence
+    # for JUJUY at all, so this is 0.0, not an artificial 1.0.
+    assert body["entidades_predichas"][0]["confianza"] == 0.0

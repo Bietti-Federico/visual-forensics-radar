@@ -197,7 +197,7 @@ Combina los siete componentes en un score final de 0 a 100:
 | Componente | Fórmula | Por qué |
 |---|---|---|
 | `rule_engine` | Noisy-OR sobre severidades de reglas | La evidencia independiente satura hacia 1.0 sin que una suma simple se pase |
-| `ml_probability` | Promedio de probabilidades del ensamble | Todas son P(manipulado), comparables entre sí |
+| `ml_probability` | Noisy-OR sobre la probabilidad de cada modelo (no un promedio) | Que varios modelos entrenados con arquitecturas distintas coincidan en "manipulado" es evidencia que se refuerza, no que se diluye — un promedio dejaba un caso con los 5 modelos de acuerdo (50-78% cada uno) en apenas 18/100 |
 | `anomaly_detection` | Fracción de detectores que marcaron `is_anomaly` (no el score crudo, no Noisy-OR) | El score crudo no es comparable entre los 4 detectores; el flag sí. Un solo detector en el límite (ej. one_class_svm con score≈0, artefacto conocido con pocas muestras por entidad) pesa proporcionalmente menos que varios de acuerdo, en vez de contribuir lo mismo que un consenso real |
 | `structural` | Densidad de anomalías / cantidad de objetos | Señal general, distinta de los patrones específicos del motor de reglas |
 | `metadata` | Fracción de campos de `/Info` faltantes | Metadata faltante correlaciona con "limpieza" del documento |
@@ -356,6 +356,25 @@ nueva no requiere ningún cambio de código para Identificación de Entidad,
 Anomaly Detection, ML Ensemble ni Invariantes — todos se ajustan por
 entidad a partir de lo que haya en disco.
 
+**Nunca subir la salida del generador sintético de `pdf-forensics-benchmark`
+acá** (archivos con patrones como `__variant_N__`, `__pikepdf_metadata_removal`,
+`__pymupdf_incremental_save`) — eso ya pasó una vez y contaminó tanto
+`genuine/` como `confirmed_fraud/` de las tres entidades. El problema no es
+sólo que "no sean genuinos": son resaves del mismo puñado de documentos
+reales con pikepdf/PyMuPDF, así que:
+- En `genuine/`, mezclan documentos con pequeñas variaciones estructurales
+  no representativas de la plantilla real, ensuciando justo la referencia
+  que Anomaly Detection usa para definir "normal" — esto fue la causa real
+  de que documentos genuinos legítimos empezaran a marcarse como anómalos.
+- En `confirmed_fraud/`, son casi duplicados exactos de un documento que ya
+  está en `genuine/` — el ML Ensemble aprendería a reconocer la huella de
+  la herramienta de fabricación (pikepdf vs. sin tocar), no un patrón de
+  fraude real como el de AMPF (edición manual para hacerse pasar por otra
+  entidad).
+
+Esa fuente sintética sigue siendo válida para I+D contra el benchmark
+(sección 12), nunca para este corpus de producción.
+
 ### Esquema de persistencia (v3.0.0)
 
 ```python
@@ -395,7 +414,7 @@ entidad.
 | Endpoint | Qué hace |
 |---|---|
 | `GET /` | Sirve el frontend estático. |
-| `POST /verify` | Sube un PDF, corre todo el pipeline en memoria, devuelve el JSON completo **en español** (keys y textos — ver abajo). `422` si no es un PDF legible. |
+| `POST /verify` | Sube un PDF, corre todo el pipeline en memoria, devuelve el JSON completo **en español** (keys y textos — ver abajo). `422` si no es un PDF legible. Campo opcional `entity` (form field): fuerza qué entidad usar para elegir detectores/invariantes/modelo, para cuando el clasificador se equivoca y no tiene sentido esperar a un reentrenamiento para volver a puntuar ese documento contra la entidad correcta. Ver más abajo qué cambia exactamente y qué no. |
 | `POST /training-data/suggest-entity` | Corre el pipeline completo de scoring (lo mismo que `/verify`) sobre un archivo y sugiere entidad, confianza, `risk_score`, y si parece genuino o fraude confirmado (`risk_score < 50` ⇒ genuino) — para precargar el formulario de carga sin que alguien tenga que ya saber la respuesta. Es una sugerencia editable en ambos campos, nunca un veredicto: una entidad nueva no tiene clasificador que la reconozca, y "genuino/fraude" es un umbral sobre el mismo risk score que ve `/verify`, no una clasificación con ground truth. |
 | `POST /training-data/genuine` | Sube un documento genuino a `training_corpus/genuine/<entidad>/`. No reentrena. |
 | `POST /training-data/confirmed-fraud` | Igual, bajo `confirmed_fraud/`. |
@@ -410,6 +429,34 @@ entidad.
 sanitizan (`_sanitize_path_component`) antes de usarse como segmentos de
 ruta, para que no se pueda escapar del directorio del corpus. **Tamaño
 máximo de subida**: 25 MB.
+
+### Qué cambia (y qué no) al forzar la entidad en `/verify`
+
+El campo `entity` reemplaza qué entidad se usa para elegir el bundle
+(detectores/modelos/invariantes) — pero **no** pisa la confianza real que
+calculó el clasificador para esa entidad con un 100% artificial. Un
+override cambia dos cosas puntuales, no todo el cálculo:
+
+1. **Se fuerza el chequeo de invariantes** (`CheckEntityInvariantsUseCase`
+   con `force=True`), pasando por alto el umbral mínimo de confianza
+   (`_MIN_CONFIDENCE = 0.6`) que normalmente lo bloquea. Una vez que una
+   persona confirmó *qué* entidad es, "no hay confianza suficiente sobre
+   qué entidad es" deja de aplicar — y ese chequeo es exactamente lo que
+   uno quiere ver en un caso dudoso.
+2. **`entity_consistency` sigue reflejando la confianza real** que el
+   clasificador calculó para esa entidad puntual (buscada en las
+   `probabilities` de la predicción original, `0.0` si el clasificador ni
+   siquiera conoce esa entidad) — no se fuerza a `0.0` con un 100%
+   artificial. Un documento "confirmado como entidad X" que estructuralmente
+   no se parece en nada a X sigue sumando riesgo por ese lado, con razón.
+
+Consecuencia práctica: forzar la **misma** entidad que ya venía prediciendo
+el clasificador da exactamente el mismo puntaje que sin forzar (`entity_consistency`
+no cambia), salvo que el chequeo de invariantes estuviera bloqueado por baja
+confianza — en ese caso, forzarla revela violaciones que antes quedaban
+calladas. Forzar una entidad **distinta** sí puede cambiar bastante el
+puntaje, porque cambia el bundle completo (detectores, modelo, invariantes)
+contra el que se compara el documento.
 
 ### El JSON de `/verify` está en español
 

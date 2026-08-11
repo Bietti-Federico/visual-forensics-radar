@@ -50,6 +50,7 @@ from pdf_forensics.application.signature_verification.verify_signatures_use_case
 from pdf_forensics.domain.entity_identification.entity_identification_report import (
     EntityIdentificationReport,
 )
+from pdf_forensics.domain.entity_identification.entity_prediction import EntityPrediction
 from pdf_forensics.domain.explainability.explanation_report import ExplanationReport
 from pdf_forensics.domain.fingerprint.fingerprint import PdfFingerprint
 from pdf_forensics.domain.risk.risk_report import RiskReport
@@ -80,7 +81,9 @@ class ScoreDocumentUseCase:
         self._entity_classifiers = tuple(entity_classifiers)
         self._per_entity = dict(per_entity)
 
-    def execute(self, pdf_bytes: bytes) -> DocumentScoringResult:
+    def execute(
+        self, pdf_bytes: bytes, entity_override: str | None = None
+    ) -> DocumentScoringResult:
         parse_pdf = ParsePdfUseCase()
         extract_features = FeatureExtractionUseCase(default_feature_extractors())
 
@@ -89,6 +92,38 @@ class ScoreDocumentUseCase:
         fingerprint = GenerateFingerprintUseCase().execute(document, feature_set)
 
         entity_report = IdentifyEntityUseCase(self._entity_classifiers).execute(feature_set)
+        force_invariant_check = False
+        if entity_override:
+            # The classifier's own guess can be wrong, and there's no need
+            # to wait for a retrain to correct it for this one document —
+            # a manually confirmed entity replaces which entity is reported
+            # and which bundle gets used. But confidence is deliberately
+            # NOT set to 1.0: a human confirming *which* entity a document
+            # is doesn't make it look any more structurally like that
+            # entity's usual templates — entity_consistency should keep
+            # reflecting the classifier's own (possibly low) structural
+            # match for that entity, since "confirmed to be entity X yet
+            # doesn't look like X at all" is itself a real, informative
+            # signal worth keeping, not discarding. What the override does
+            # unlock is the invariant check below (`force=True`): once a
+            # human has resolved *which* entity this is, "not confident
+            # which entity this is" no longer applies, so it's checked
+            # regardless of how low that structural confidence is.
+            original_probabilities = (
+                entity_report.predictions[0].probabilities if entity_report.predictions else {}
+            )
+            confidence = original_probabilities.get(entity_override, 0.0)
+            entity_report = EntityIdentificationReport(
+                predictions=[
+                    EntityPrediction(
+                        classifier_id="manual_override",
+                        predicted_entity=entity_override,
+                        confidence=confidence,
+                        probabilities={**original_probabilities, entity_override: confidence},
+                    )
+                ]
+            )
+            force_invariant_check = True
         # Exactly one classifier is configured by design (see
         # plugins/entity_identification/__init__.py) — its top prediction
         # picks which entity's bundle to use.
@@ -109,7 +144,7 @@ class ScoreDocumentUseCase:
 
         plain_rule_report = EvaluateRulesUseCase(default_rules()).execute(feature_set)
         invariant_finding = CheckEntityInvariantsUseCase(invariants).execute(
-            feature_set, entity_report
+            feature_set, entity_report, force=force_invariant_check
         )
         rule_report = RuleEvaluationReport(
             findings=list(plain_rule_report) + ([invariant_finding] if invariant_finding else [])

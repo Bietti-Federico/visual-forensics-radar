@@ -141,10 +141,24 @@ class GenerateRiskReportUseCase:
         return flagged / len(scores)
 
     def _ml_probability_score(self, ml_report: MlEnsembleReport) -> float:
+        """
+        Noisy-OR over each model's own probability, not a flat mean — the
+        same combination `_rule_engine_score` already uses, just with each
+        model's actual probability as its base rate instead of a fixed
+        severity constant. A flat mean let every model independently
+        leaning "manipulated" (e.g. five different model architectures all
+        above 50%) get diluted into a middling average; the point of an
+        *ensemble* is that agreement across independently-trained models
+        is itself strong corroborating evidence, which Noisy-OR reflects
+        by compounding it instead of averaging it away.
+        """
         probabilities = [prediction.probability for prediction in ml_report]
         if not probabilities:
             return 0.0
-        return sum(probabilities) / len(probabilities)
+        probability_of_no_risk = 1.0
+        for probability in probabilities:
+            probability_of_no_risk *= 1.0 - probability
+        return 1.0 - probability_of_no_risk
 
     def _structural_score(self, feature_set: FeatureSet) -> float:
         anomaly_count_feature = feature_set.by_name("statistics.anomaly_count_total")

@@ -40,13 +40,22 @@ class CheckEntityInvariantsUseCase:
         self._invariants = tuple(invariants)
 
     def execute(
-        self, feature_set: FeatureSet, entity_report: EntityIdentificationReport
+        self,
+        feature_set: FeatureSet,
+        entity_report: EntityIdentificationReport,
+        *,
+        force: bool = False,
     ) -> RuleFinding | None:
+        """`force=True` (a human-confirmed entity override, not the
+        classifier's own guess — see `ScoreDocumentUseCase`) skips the
+        confidence gate: once identity is no longer uncertain, "doesn't
+        confidently match" no longer applies, and checking invariants is
+        exactly what a manual correction is for."""
         if not self._invariants or not entity_report.predictions:
             return None
 
         prediction = entity_report.predictions[0]
-        if prediction.confidence < _MIN_CONFIDENCE:
+        if not force and prediction.confidence < _MIN_CONFIDENCE:
             return None
 
         violations = [

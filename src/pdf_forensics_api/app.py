@@ -134,18 +134,26 @@ def _parse_or_422(pdf_bytes: bytes, *, filename: str | None) -> None:
 
 
 @app.post("/verify")
-async def verify(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:  # noqa: B008
+async def verify(
+    request: Request,
+    file: UploadFile = File(...),  # noqa: B008
+    entity: str | None = Form(None),
+) -> dict[str, Any]:
+    """`entity`, if given, overrides the classifier's own guess entirely —
+    the entity identification model sometimes gets it wrong, and there's
+    no reason to force a retrain just to re-score one document against
+    the entity a human can already tell it actually is."""
     pdf_bytes = await _read_upload(file)
     use_case = ScoreDocumentUseCase(
         request.app.state.entity_classifiers, request.app.state.per_entity
     )
     try:
-        result = use_case.execute(pdf_bytes)
+        result = use_case.execute(pdf_bytes, entity_override=entity)
     except (NotAPdfError, UnrecoverableStructureError) as exc:
         logger.warning("Verificación de %r falló: no es un PDF legible: %s", file.filename, exc)
         raise HTTPException(status_code=422, detail=f"Not a readable PDF: {exc}") from exc
     logger.info(
-        "Verificado %r: riesgo=%d entidad=%s",
+        "Verificado %r: riesgo=%d entidad=%s%s",
         file.filename,
         result.risk_report.risk_score,
         (
@@ -153,6 +161,7 @@ async def verify(request: Request, file: UploadFile = File(...)) -> dict[str, An
             if result.entity_report.predictions
             else "desconocida"
         ),
+        " (manual)" if entity else "",
     )
     return serialize_scoring_result(result)
 

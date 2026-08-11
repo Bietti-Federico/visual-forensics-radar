@@ -121,7 +121,7 @@ def test_noisy_or_saturates_but_never_exceeds_one() -> None:
     assert 0.999 < rule_engine_component.score < 1.0
 
 
-def test_ml_probability_is_mean_of_predictions() -> None:
+def test_ml_probability_is_noisy_or_of_predictions() -> None:
     ml_report = MlEnsembleReport(
         predictions=[
             ModelPrediction(model_id="a", probability=0.2, predicted_label=False),
@@ -138,7 +138,39 @@ def test_ml_probability_is_mean_of_predictions() -> None:
         SignatureVerificationReport(),
     )
     ml_component = next(c for c in report.components if c.name == "ml_probability")
-    assert ml_component.score == 0.5
+    # 1 - (1-0.2)*(1-0.8) = 1 - 0.16 = 0.84
+    assert ml_component.score == pytest.approx(0.84)
+
+
+def test_ml_probability_amplifies_agreement_across_models() -> None:
+    # Five different model architectures all independently leaning
+    # "manipulated" (barely, in some cases) is stronger evidence than any
+    # one of them alone — a flat mean used to dilute this into a middling
+    # score; Noisy-OR compounds it instead.
+    ml_report = MlEnsembleReport(
+        predictions=[
+            ModelPrediction(model_id=name, probability=p, predicted_label=True)
+            for name, p in [
+                ("random_forest", 0.50),
+                ("extra_trees", 0.62),
+                ("logistic_regression", 0.74),
+                ("stacking_ensemble", 0.78),
+                ("voting_ensemble", 0.55),
+            ]
+        ]
+    )
+    report = GenerateRiskReportUseCase().execute(
+        _clean_feature_set(),
+        RuleEvaluationReport(),
+        AnomalyDetectionReport(),
+        ml_report,
+        [],
+        EntityIdentificationReport(),
+        SignatureVerificationReport(),
+    )
+    ml_component = next(c for c in report.components if c.name == "ml_probability")
+    mean = (0.50 + 0.62 + 0.74 + 0.78 + 0.55) / 5
+    assert ml_component.score > mean
 
 
 def test_anomaly_detection_uses_is_anomaly_flag_only() -> None:
